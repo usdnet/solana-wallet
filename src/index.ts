@@ -2,7 +2,7 @@
  * solana-wallet package
  */
 
-export { SolanaWallet, WalletOptions, EncryptedWalletData } from './wallet';
+export { SolanaWallet, WalletOptions, EncryptedWalletData, WalletWithMnemonic } from './wallet';
 export { Keypair, PublicKey, Transaction, VersionedTransaction } from '@solana/web3.js';
 export {
   secureWipe,

@@ -14,11 +14,33 @@ yarn add solana-wallet
 
 ## Quick Start
 
-### Create Wallet
+### Create Wallet with Mnemonic
 
 ```typescript
 import { SolanaWallet } from 'solana-wallet';
 
+// Generate mnemonic and create wallet together
+const { wallet, mnemonic } = SolanaWallet.createWithMnemonic();
+console.log('Address:', wallet.getAddress());
+console.log('Mnemonic:', mnemonic); // Save this securely!
+
+// Or generate 24-word mnemonic
+const { wallet: wallet24, mnemonic: mnemonic24 } = SolanaWallet.createWithMnemonic({ strength: 256 });
+```
+
+### Generate Mnemonic Only
+
+```typescript
+// Generate 12-word mnemonic (default)
+const mnemonic = SolanaWallet.generateMnemonic();
+
+// Generate 24-word mnemonic
+const mnemonic24 = SolanaWallet.generateMnemonic(256);
+```
+
+### Create Wallet (Random Keypair)
+
+```typescript
 const wallet = SolanaWallet.create();
 console.log('Address:', wallet.getAddress());
 ```
@@ -99,7 +121,9 @@ const isValid = wallet.verifyMessage('Hello, Solana!', signature);
 ### SolanaWallet
 
 **Static Methods:**
-- `create(options?)` - Create new wallet
+- `generateMnemonic(strength?)` - Generate mnemonic seed phrase (128 bits = 12 words, 256 bits = 24 words)
+- `createWithMnemonic(options?)` - Generate mnemonic and create wallet together
+- `create(options?)` - Create new wallet with random keypair
 - `fromSeedPhrase(mnemonic, options?)` - Import from seed phrase
 - `fromPrivateKey(privateKey)` - Import from private key (base58/base64/hex/Uint8Array)
 - `fromEncrypted(encryptedData, password)` - Import from encrypted data

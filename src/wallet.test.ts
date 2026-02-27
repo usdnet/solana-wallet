@@ -9,6 +9,79 @@ import * as bip39 from 'bip39';
 import * as bs58 from 'bs58';
 
 describe('SolanaWallet', () => {
+  describe('generateMnemonic', () => {
+    it('should generate a valid 12-word mnemonic by default', () => {
+      const mnemonic = SolanaWallet.generateMnemonic();
+      expect(bip39.validateMnemonic(mnemonic)).toBe(true);
+      expect(mnemonic.split(' ').length).toBe(12);
+    });
+
+    it('should generate a 12-word mnemonic with strength 128', () => {
+      const mnemonic = SolanaWallet.generateMnemonic(128);
+      expect(bip39.validateMnemonic(mnemonic)).toBe(true);
+      expect(mnemonic.split(' ').length).toBe(12);
+    });
+
+    it('should generate a 24-word mnemonic with strength 256', () => {
+      const mnemonic = SolanaWallet.generateMnemonic(256);
+      expect(bip39.validateMnemonic(mnemonic)).toBe(true);
+      expect(mnemonic.split(' ').length).toBe(24);
+    });
+
+    it('should generate different mnemonics each time', () => {
+      const mnemonic1 = SolanaWallet.generateMnemonic();
+      const mnemonic2 = SolanaWallet.generateMnemonic();
+      expect(mnemonic1).not.toBe(mnemonic2);
+    });
+  });
+
+  describe('createWithMnemonic', () => {
+    it('should create wallet with mnemonic', () => {
+      const { wallet, mnemonic } = SolanaWallet.createWithMnemonic();
+      expect(wallet).toBeInstanceOf(SolanaWallet);
+      expect(bip39.validateMnemonic(mnemonic)).toBe(true);
+      expect(mnemonic.split(' ').length).toBe(12);
+    });
+
+    it('should create wallet that can be restored from the mnemonic', () => {
+      const { wallet, mnemonic } = SolanaWallet.createWithMnemonic();
+      const address1 = wallet.getAddress();
+
+      const restoredWallet = SolanaWallet.fromSeedPhrase(mnemonic);
+      const address2 = restoredWallet.getAddress();
+
+      expect(address1).toBe(address2);
+    });
+
+    it('should create 24-word mnemonic with strength 256', () => {
+      const { wallet, mnemonic } = SolanaWallet.createWithMnemonic({ strength: 256 });
+      expect(bip39.validateMnemonic(mnemonic)).toBe(true);
+      expect(mnemonic.split(' ').length).toBe(24);
+      expect(wallet).toBeInstanceOf(SolanaWallet);
+    });
+
+    it('should accept custom derivation path', () => {
+      const { wallet, mnemonic } = SolanaWallet.createWithMnemonic({
+        derivationPath: "m/44'/501'/1'/0'",
+      });
+      expect(wallet).toBeInstanceOf(SolanaWallet);
+      expect(bip39.validateMnemonic(mnemonic)).toBe(true);
+
+      const restoredWallet = SolanaWallet.fromSeedPhrase(mnemonic, {
+        derivationPath: "m/44'/501'/1'/0'",
+      });
+      expect(restoredWallet.getAddress()).toBe(wallet.getAddress());
+    });
+
+    it('should create different wallets each time', () => {
+      const { wallet: wallet1, mnemonic: mnemonic1 } = SolanaWallet.createWithMnemonic();
+      const { wallet: wallet2, mnemonic: mnemonic2 } = SolanaWallet.createWithMnemonic();
+
+      expect(mnemonic1).not.toBe(mnemonic2);
+      expect(wallet1.getAddress()).not.toBe(wallet2.getAddress());
+    });
+  });
+
   describe('create', () => {
     it('should create a new wallet with random keypair', () => {
       const wallet = SolanaWallet.create();

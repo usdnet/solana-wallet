@@ -20,6 +20,11 @@ export interface WalletOptions {
   derivationPath?: string;
 }
 
+export interface WalletWithMnemonic {
+  wallet: SolanaWallet;
+  mnemonic: string;
+}
+
 export interface EncryptedWalletData {
   encrypted: string;
   iv: string;
@@ -41,11 +46,33 @@ export class SolanaWallet {
   }
 
   /**
+   * Generate a new mnemonic seed phrase
+   * @param strength - Entropy strength in bits (128 for 12 words, 256 for 24 words). Default: 128
+   */
+  static generateMnemonic(strength: number = 128): string {
+    return bip39.generateMnemonic(strength);
+  }
+
+  /**
    * Create a new wallet with a random keypair
    */
   static create(options: WalletOptions = {}): SolanaWallet {
     const keypair = Keypair.generate();
     return new SolanaWallet(keypair, options.derivationPath);
+  }
+
+  /**
+   * Generate a mnemonic and create a wallet from it
+   * @param options - Wallet options including derivation path and mnemonic strength
+   * @returns Object containing both the wallet and the mnemonic phrase
+   */
+  static createWithMnemonic(options: WalletOptions & { strength?: number } = {}): WalletWithMnemonic {
+    const strength = options.strength ?? 128;
+    const mnemonic = SolanaWallet.generateMnemonic(strength);
+    const wallet = SolanaWallet.fromSeedPhrase(mnemonic, {
+      derivationPath: options.derivationPath,
+    });
+    return { wallet, mnemonic };
   }
 
   /**
