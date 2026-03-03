@@ -41,6 +41,7 @@
     "vitest": "^1.0.4"
   },
   "dependencies": {
+    "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.87.6",
     "bip39": "^3.1.0",
     "bs58": "^5.0.0",

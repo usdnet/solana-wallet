@@ -102,6 +102,77 @@ const signature = wallet.signMessage('Hello, Solana!');
 const isValid = wallet.verifyMessage('Hello, Solana!', signature);
 ```
 
+### Get Balance
+
+```typescript
+import { Connection } from '@solana/web3.js';
+
+const connection = new Connection('https://api.mainnet-beta.solana.com');
+
+// Get SOL balance
+const solBalance = await wallet.getBalance(connection);
+console.log(`Balance: ${solBalance} SOL`);
+
+// Get SPL token balance
+const tokenMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // USDC
+const tokenBalance = await wallet.getTokenBalance(connection, tokenMint);
+if (tokenBalance) {
+  console.log(`Token Balance: ${tokenBalance.uiAmount} (${tokenBalance.amount} raw)`);
+}
+
+// Get all SPL token balances
+const allTokens = await wallet.getAllTokenBalances(connection);
+console.log(`Found ${allTokens.length} token accounts`);
+```
+
+### Send SOL
+
+```typescript
+import { Connection, PublicKey } from '@solana/web3.js';
+
+const connection = new Connection('https://api.mainnet-beta.solana.com');
+const recipient = new PublicKey('RecipientAddressHere');
+
+// Send 0.1 SOL
+const signature = await wallet.sendSol(connection, recipient, 0.1);
+console.log(`Transaction: ${signature}`);
+```
+
+### Send SPL Tokens
+
+```typescript
+import { Connection, PublicKey } from '@solana/web3.js';
+
+const connection = new Connection('https://api.mainnet-beta.solana.com');
+const tokenMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'); // USDC
+const recipient = new PublicKey('RecipientAddressHere');
+
+// Send 100 tokens (with 6 decimals)
+const signature = await wallet.sendToken(connection, tokenMint, recipient, 100, {
+  decimals: 6, // Optional: auto-detected if not provided
+});
+console.log(`Transaction: ${signature}`);
+```
+
+### Get Transaction Activity
+
+```typescript
+import { Connection } from '@solana/web3.js';
+
+const connection = new Connection('https://api.mainnet-beta.solana.com');
+
+// Get recent transactions
+const activities = await wallet.getTransactionActivity(connection, {
+  limit: 20, // Optional: default 20
+});
+
+for (const activity of activities) {
+  console.log(`${activity.type}: ${activity.amount || 'N/A'} ${activity.tokenMint || 'SOL'}`);
+  console.log(`Signature: ${activity.signature}`);
+  console.log(`Time: ${activity.blockTime ? new Date(activity.blockTime * 1000) : 'N/A'}`);
+}
+```
+
 ## Security
 
 **⚠️ Never store private keys or seed phrases in:**
@@ -133,6 +204,12 @@ const isValid = wallet.verifyMessage('Hello, Solana!', signature);
 - `getPublicKey()` - Get PublicKey object
 - `getPrivateKey()` - Get private key as Uint8Array
 - `getPrivateKeyBase58()` / `getPrivateKeyBase64()` / `getPrivateKeyHex()` - Get private key in various formats
+- `getBalance(connection)` - Get SOL balance (returns number in SOL)
+- `getTokenBalance(connection, tokenMint)` - Get SPL token balance for specific token
+- `getAllTokenBalances(connection)` - Get all SPL token balances
+- `sendSol(connection, to, amount, options?)` - Send SOL to another address
+- `sendToken(connection, tokenMint, to, amount, options?)` - Send SPL tokens to another address
+- `getTransactionActivity(connection, options?)` - Get transaction history
 - `signTransaction(transaction)` - Sign transaction
 - `signMessage(message)` - Sign message (returns Uint8Array)
 - `signMessageBase64(message)` / `signMessageBase58(message)` - Sign message in specific format

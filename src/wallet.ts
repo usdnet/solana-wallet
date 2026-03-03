@@ -2,7 +2,19 @@
  * Solana self-custodial wallet functionality
  */
 
-import { Keypair, PublicKey, Transaction, VersionedTransaction } from '@solana/web3.js';
+import {
+  Keypair,
+  PublicKey,
+  Transaction,
+  VersionedTransaction,
+  Connection,
+  LAMPORTS_PER_SOL,
+  SystemProgram,
+  sendAndConfirmTransaction,
+  ParsedTransactionWithMeta,
+  ConfirmedSignatureInfo,
+} from '@solana/web3.js';
+import { getAccount, getAssociatedTokenAddress, createTransferInstruction, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import * as bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
 import * as nacl from 'tweetnacl';
@@ -30,6 +42,24 @@ export interface EncryptedWalletData {
   iv: string;
   salt: string;
   derivationPath?: string;
+}
+
+export interface TokenBalance {
+  mint: string;
+  amount: string;
+  decimals: number;
+  uiAmount: number;
+}
+
+export interface TransactionActivity {
+  signature: string;
+  slot: number;
+  blockTime: number | null;
+  err: ConfirmedSignatureInfo['err'];
+  memo?: string;
+  type: 'send' | 'receive' | 'other';
+  amount?: number;
+  tokenMint?: string;
 }
 
 /**
@@ -330,6 +360,328 @@ export class SolanaWallet {
    */
   getDerivationPath(): string {
     return this.derivationPath;
+  }
+
+  /**
+   * Get SOL balance for this wallet
+   * @param connection - Solana RPC connection
+   * @returns Balance in SOL (not lamports)
+   */
+  async getBalance(connection: Connection): Promise<number> {
+    this.ensureNotCleared();
+    const lamports = await connection.getBalance(this.keypair.publicKey);
+    return lamports / LAMPORTS_PER_SOL;
+  }
+
+  /**
+   * Get SPL token balance for a specific token
+   * @param connection - Solana RPC connection
+   * @param tokenMint - Token mint address (PublicKey or string)
+   * @returns Token balance information
+   */
+  async getTokenBalance(
+    connection: Connection,
+    tokenMint: PublicKey | string
+  ): Promise<TokenBalance | null> {
+    this.ensureNotCleared();
+
+    const mintPublicKey = typeof tokenMint === 'string' ? new PublicKey(tokenMint) : tokenMint;
+    const associatedTokenAddress = await getAssociatedTokenAddress(
+      mintPublicKey,
+      this.keypair.publicKey
+    );
+
+    try {
+      const tokenAccount = await getAccount(connection, associatedTokenAddress);
+
+      // Get mint info to get decimals
+      const mintInfo = await connection.getParsedAccountInfo(mintPublicKey);
+      let decimals = 9; // Default fallback
+      if (mintInfo.value && 'parsed' in mintInfo.value.data) {
+        decimals = mintInfo.value.data.parsed.info.decimals;
+      }
+
+      const amount = Number(tokenAccount.amount);
+      const uiAmount = amount / Math.pow(10, decimals);
+
+      return {
+        mint: mintPublicKey.toBase58(),
+        amount: tokenAccount.amount.toString(),
+        decimals,
+        uiAmount,
+      };
+    } catch {
+      // Account doesn't exist, return null
+      return null;
+    }
+  }
+
+  /**
+   * Get all SPL token balances for this wallet
+   * @param connection - Solana RPC connection
+   * @returns Array of token balances
+   */
+  async getAllTokenBalances(connection: Connection): Promise<TokenBalance[]> {
+    this.ensureNotCleared();
+
+    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(this.keypair.publicKey, {
+      programId: TOKEN_PROGRAM_ID,
+    });
+
+    return tokenAccounts.value.map((account) => {
+      const parsedInfo = account.account.data.parsed.info;
+      return {
+        mint: parsedInfo.mint,
+        amount: parsedInfo.tokenAmount.amount,
+        decimals: parsedInfo.tokenAmount.decimals,
+        uiAmount: parsedInfo.tokenAmount.uiAmount || 0,
+      };
+    });
+  }
+
+  /**
+   * Send SOL to another address
+   * @param connection - Solana RPC connection
+   * @param to - Recipient address (PublicKey or string)
+   * @param amount - Amount in SOL (not lamports)
+   * @param options - Optional transaction options
+   * @returns Transaction signature
+   */
+  async sendSol(
+    connection: Connection,
+    to: PublicKey | string,
+    amount: number,
+    options?: {
+      skipPreflight?: boolean;
+      maxRetries?: number;
+    }
+  ): Promise<string> {
+    this.ensureNotCleared();
+
+    const toPublicKey = typeof to === 'string' ? new PublicKey(to) : to;
+    const lamports = amount * LAMPORTS_PER_SOL;
+
+    const transaction = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: this.keypair.publicKey,
+        toPubkey: toPublicKey,
+        lamports,
+      })
+    );
+
+    const signature = await sendAndConfirmTransaction(
+      connection,
+      transaction,
+      [this.keypair],
+      {
+        skipPreflight: options?.skipPreflight,
+        maxRetries: options?.maxRetries,
+      }
+    );
+
+    return signature;
+  }
+
+  /**
+   * Send SPL tokens to another address
+   * @param connection - Solana RPC connection
+   * @param tokenMint - Token mint address (PublicKey or string)
+   * @param to - Recipient address (PublicKey or string)
+   * @param amount - Amount in token's smallest unit (considering decimals)
+   * @param options - Optional transaction options
+   * @returns Transaction signature
+   */
+  async sendToken(
+    connection: Connection,
+    tokenMint: PublicKey | string,
+    to: PublicKey | string,
+    amount: number,
+    options?: {
+      skipPreflight?: boolean;
+      maxRetries?: number;
+      decimals?: number;
+    }
+  ): Promise<string> {
+    this.ensureNotCleared();
+
+    const mintPublicKey = typeof tokenMint === 'string' ? new PublicKey(tokenMint) : tokenMint;
+    const toPublicKey = typeof to === 'string' ? new PublicKey(to) : to;
+
+    // Get source and destination token accounts
+    const fromTokenAddress = await getAssociatedTokenAddress(mintPublicKey, this.keypair.publicKey);
+    const toTokenAddress = await getAssociatedTokenAddress(mintPublicKey, toPublicKey);
+
+    // Get token decimals if not provided
+    let decimals = options?.decimals;
+    if (!decimals) {
+      try {
+        const mintInfo = await connection.getParsedAccountInfo(mintPublicKey);
+        if (mintInfo.value && 'parsed' in mintInfo.value.data) {
+          decimals = mintInfo.value.data.parsed.info.decimals;
+        } else {
+          decimals = 9; // Default fallback
+        }
+      } catch {
+        decimals = 9; // Default fallback
+      }
+    }
+
+    // Convert amount to token's smallest unit
+    const finalDecimals = decimals || 9;
+    const amountInSmallestUnit = BigInt(Math.floor(amount * Math.pow(10, finalDecimals)));
+
+    const transaction = new Transaction().add(
+      createTransferInstruction(
+        fromTokenAddress,
+        toTokenAddress,
+        this.keypair.publicKey,
+        amountInSmallestUnit,
+        [],
+        TOKEN_PROGRAM_ID
+      )
+    );
+
+    const signature = await sendAndConfirmTransaction(
+      connection,
+      transaction,
+      [this.keypair],
+      {
+        skipPreflight: options?.skipPreflight,
+        maxRetries: options?.maxRetries,
+      }
+    );
+
+    return signature;
+  }
+
+  /**
+   * Get transaction activity for this wallet
+   * @param connection - Solana RPC connection
+   * @param options - Options for fetching transactions
+   * @returns Array of transaction activities
+   */
+  async getTransactionActivity(
+    connection: Connection,
+    options?: {
+      limit?: number;
+      before?: string;
+      until?: string;
+    }
+  ): Promise<TransactionActivity[]> {
+    this.ensureNotCleared();
+
+    const limit = options?.limit || 20;
+    const signatures = await connection.getSignaturesForAddress(
+      this.keypair.publicKey,
+      {
+        limit,
+        before: options?.before,
+        until: options?.until,
+      }
+    );
+
+    const activities: TransactionActivity[] = [];
+
+    for (const sigInfo of signatures) {
+      try {
+        const tx = await connection.getParsedTransaction(sigInfo.signature, {
+          maxSupportedTransactionVersion: 0,
+        });
+
+        const activity = this.parseTransactionActivity(sigInfo, tx, this.keypair.publicKey);
+        activities.push(activity);
+      } catch {
+        // If we can't parse the transaction, add basic info
+        activities.push({
+          signature: sigInfo.signature,
+          slot: sigInfo.slot,
+          blockTime: sigInfo.blockTime ?? null,
+          err: sigInfo.err,
+          type: 'other',
+        });
+      }
+    }
+
+    return activities;
+  }
+
+  /**
+   * Parse transaction to determine activity type and details
+   * @private
+   */
+  private parseTransactionActivity(
+    sigInfo: ConfirmedSignatureInfo,
+    tx: ParsedTransactionWithMeta | null,
+    walletPubkey: PublicKey
+  ): TransactionActivity {
+    if (!tx || !tx.meta) {
+      return {
+        signature: sigInfo.signature,
+        slot: sigInfo.slot,
+        blockTime: sigInfo.blockTime ?? null,
+        err: sigInfo.err,
+        type: 'other',
+      };
+    }
+
+    const walletAddress = walletPubkey.toBase58();
+    let type: 'send' | 'receive' | 'other' = 'other';
+    let amount: number | undefined;
+    let tokenMint: string | undefined;
+    let memo: string | undefined;
+
+    // Check for memo
+    if (tx.transaction.message.instructions) {
+      for (const ix of tx.transaction.message.instructions) {
+        if ('parsed' in ix && ix.parsed?.type === 'memo') {
+          memo = ix.parsed.memo;
+        }
+      }
+    }
+
+    // Find wallet's account index
+    const accountKeys = tx.transaction.message.accountKeys.map((key) =>
+      typeof key === 'string' ? key : key.pubkey.toBase58()
+    );
+    const walletIndex = accountKeys.findIndex((key) => key === walletAddress);
+
+    // Check for SOL transfers
+    if (walletIndex >= 0) {
+      const preBalance = tx.meta.preBalances[walletIndex] || 0;
+      const postBalance = tx.meta.postBalances[walletIndex] || 0;
+      const balanceChange = (postBalance - preBalance) / LAMPORTS_PER_SOL;
+
+      if (Math.abs(balanceChange) > 0.000001) {
+        type = balanceChange > 0 ? 'receive' : 'send';
+        amount = Math.abs(balanceChange);
+      }
+    }
+
+    // Check for token transfers
+    if (tx.meta.postTokenBalances && tx.meta.postTokenBalances.length > 0) {
+      for (const balance of tx.meta.postTokenBalances) {
+        if (balance.owner === walletAddress) {
+          tokenMint = balance.mint;
+          const uiAmount = balance.uiTokenAmount.uiAmount;
+          if (uiAmount && uiAmount !== 0) {
+            // Token transfers override SOL transfers
+            type = uiAmount > 0 ? 'receive' : 'send';
+            amount = Math.abs(uiAmount);
+          }
+        }
+      }
+    }
+
+    return {
+      signature: sigInfo.signature,
+      slot: sigInfo.slot,
+      blockTime: sigInfo.blockTime ?? null,
+      err: sigInfo.err,
+      memo,
+      type,
+      amount,
+      tokenMint,
+    };
   }
 
   /**

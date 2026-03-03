@@ -2,11 +2,32 @@
  * Tests for SolanaWallet
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SolanaWallet } from './wallet';
-import { Keypair, Transaction, SystemProgram, PublicKey } from '@solana/web3.js';
+import { Keypair, Transaction, SystemProgram, PublicKey, Connection } from '@solana/web3.js';
+import * as web3 from '@solana/web3.js';
 import * as bip39 from 'bip39';
 import * as bs58 from 'bs58';
+import * as splToken from '@solana/spl-token';
+
+// Mock @solana/web3.js
+vi.mock('@solana/web3.js', async () => {
+  const actual = await vi.importActual('@solana/web3.js');
+  return {
+    ...actual,
+    sendAndConfirmTransaction: vi.fn(),
+  };
+});
+
+// Mock @solana/spl-token
+vi.mock('@solana/spl-token', async () => {
+  const actual = await vi.importActual('@solana/spl-token');
+  return {
+    ...actual,
+    getAssociatedTokenAddress: vi.fn(),
+    getAccount: vi.fn(),
+  };
+});
 
 describe('SolanaWallet', () => {
   describe('generateMnemonic', () => {
@@ -362,6 +383,355 @@ describe('SolanaWallet', () => {
       expect(typeof base64).toBe('string');
       expect(typeof hex).toBe('string');
       expect(typeof base58).toBe('string');
+    });
+  });
+
+  describe('getBalance', () => {
+    it('should get SOL balance', async () => {
+      const wallet = SolanaWallet.create();
+      const connection = new Connection('https://api.mainnet-beta.solana.com');
+
+      // Mock the getBalance method
+      const mockGetBalance = vi.spyOn(connection, 'getBalance').mockResolvedValue(1000000000); // 1 SOL
+
+      const balance = await wallet.getBalance(connection);
+      expect(balance).toBe(1);
+      expect(mockGetBalance).toHaveBeenCalledWith(wallet.getPublicKey());
+
+      mockGetBalance.mockRestore();
+    });
+  });
+
+  describe('getTokenBalance', () => {
+    let wallet: SolanaWallet;
+    let connection: Connection;
+    let tokenMint: PublicKey;
+
+    beforeEach(() => {
+      wallet = SolanaWallet.create();
+      connection = new Connection('https://api.mainnet-beta.solana.com');
+      tokenMint = Keypair.generate().publicKey;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('should return null for non-existent token account', async () => {
+      // Mock getAssociatedTokenAddress
+      vi.spyOn(splToken, 'getAssociatedTokenAddress').mockResolvedValue(
+        Keypair.generate().publicKey
+      );
+
+      // Mock getAccount to throw error (account doesn't exist)
+      vi.spyOn(splToken, 'getAccount').mockRejectedValue(new Error('Account not found'));
+
+      const balance = await wallet.getTokenBalance(connection, tokenMint);
+      expect(balance).toBeNull();
+    });
+
+    it('should return token balance for existing account', async () => {
+      const associatedTokenAddress = Keypair.generate().publicKey;
+      vi.mocked(splToken.getAssociatedTokenAddress).mockResolvedValue(associatedTokenAddress);
+
+      // Mock getAccount to return token account
+      const mockTokenAccount = {
+        address: associatedTokenAddress,
+        mint: tokenMint,
+        owner: wallet.getPublicKey(),
+        amount: BigInt('1000000000'), // 1 token with 9 decimals
+        decimals: 9,
+      };
+      vi.mocked(splToken.getAccount).mockResolvedValue(mockTokenAccount as any);
+
+      // Mock getParsedAccountInfo for mint info
+      vi.spyOn(connection, 'getParsedAccountInfo').mockResolvedValue({
+        value: {
+          data: {
+            parsed: {
+              info: {
+                decimals: 9,
+              },
+            },
+            program: 'spl-token',
+            space: 0,
+          } as any,
+          executable: false,
+          owner: Keypair.generate().publicKey,
+          lamports: 0,
+        },
+        context: { slot: 0 },
+      });
+
+      const balance = await wallet.getTokenBalance(connection, tokenMint);
+      expect(balance).not.toBeNull();
+      expect(balance?.mint).toBe(tokenMint.toBase58());
+      expect(balance?.amount).toBe('1000000000');
+      expect(balance?.decimals).toBe(9);
+      expect(balance?.uiAmount).toBe(1);
+    });
+  });
+
+  describe('sendSol', () => {
+    let wallet: SolanaWallet;
+    let connection: Connection;
+    let recipient: PublicKey;
+
+    beforeEach(() => {
+      wallet = SolanaWallet.create();
+      connection = new Connection('https://api.mainnet-beta.solana.com');
+      recipient = Keypair.generate().publicKey;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('should send SOL transaction', async () => {
+      // Mock sendAndConfirmTransaction
+      vi.mocked(web3.sendAndConfirmTransaction).mockResolvedValue('test-signature-123' as any);
+
+      const signature = await wallet.sendSol(connection, recipient, 0.1);
+      expect(signature).toBe('test-signature-123');
+    });
+
+    it('should handle send options', async () => {
+      vi.mocked(web3.sendAndConfirmTransaction).mockResolvedValue('test-sig' as any);
+      const mockSend = vi.mocked(web3.sendAndConfirmTransaction);
+
+      await wallet.sendSol(connection, recipient, 0.1, {
+        skipPreflight: true,
+        maxRetries: 3,
+      });
+
+      expect(mockSend).toHaveBeenCalled();
+      const callArgs = mockSend.mock.calls[0];
+      expect(callArgs[3]?.skipPreflight).toBe(true);
+      expect(callArgs[3]?.maxRetries).toBe(3);
+    });
+  });
+
+  describe('sendToken', () => {
+    let wallet: SolanaWallet;
+    let connection: Connection;
+    let tokenMint: PublicKey;
+    let recipient: PublicKey;
+
+    beforeEach(() => {
+      wallet = SolanaWallet.create();
+      connection = new Connection('https://api.mainnet-beta.solana.com');
+      tokenMint = Keypair.generate().publicKey;
+      recipient = Keypair.generate().publicKey;
+    });
+
+    it('should send SPL token transaction', async () => {
+      // Mock getAssociatedTokenAddress
+      const fromATA = Keypair.generate().publicKey;
+      const toATA = Keypair.generate().publicKey;
+      vi.mocked(splToken.getAssociatedTokenAddress)
+        .mockResolvedValueOnce(fromATA)
+        .mockResolvedValueOnce(toATA);
+
+      // Mock getParsedAccountInfo for mint info
+      vi.spyOn(connection, 'getParsedAccountInfo').mockResolvedValue({
+        value: {
+          data: {
+            parsed: {
+              info: {
+                decimals: 9,
+              },
+            },
+            program: 'spl-token',
+            space: 0,
+          } as any,
+          executable: false,
+          owner: Keypair.generate().publicKey,
+          lamports: 0,
+        },
+        context: { slot: 0 },
+      });
+
+      // Mock sendAndConfirmTransaction
+      vi.mocked(web3.sendAndConfirmTransaction).mockResolvedValue('token-tx-signature' as any);
+
+      const signature = await wallet.sendToken(connection, tokenMint, recipient, 100, {
+        decimals: 9,
+      });
+      expect(signature).toBe('token-tx-signature');
+      expect(vi.mocked(web3.sendAndConfirmTransaction)).toHaveBeenCalled();
+    });
+
+    it('should auto-detect decimals if not provided', async () => {
+      const fromATA = Keypair.generate().publicKey;
+      const toATA = Keypair.generate().publicKey;
+      vi.mocked(splToken.getAssociatedTokenAddress)
+        .mockResolvedValueOnce(fromATA)
+        .mockResolvedValueOnce(toATA);
+
+      // Mock getParsedAccountInfo for mint info with 6 decimals
+      vi.spyOn(connection, 'getParsedAccountInfo').mockResolvedValue({
+        value: {
+          data: {
+            parsed: {
+              info: {
+                decimals: 6,
+              },
+            },
+            program: 'spl-token',
+            space: 0,
+          } as any,
+          executable: false,
+          owner: Keypair.generate().publicKey,
+          lamports: 0,
+        },
+        context: { slot: 0 },
+      });
+
+      vi.mocked(web3.sendAndConfirmTransaction).mockResolvedValue('tx-sig' as any);
+
+      await wallet.sendToken(connection, tokenMint, recipient, 100);
+      expect(vi.mocked(web3.sendAndConfirmTransaction)).toHaveBeenCalled();
+    });
+  });
+
+  describe('getTransactionActivity', () => {
+    let wallet: SolanaWallet;
+    let connection: Connection;
+
+    beforeEach(() => {
+      wallet = SolanaWallet.create();
+      connection = new Connection('https://api.mainnet-beta.solana.com');
+    });
+
+    it('should get transaction activity with SOL transfer', async () => {
+      const walletPubkey = wallet.getPublicKey();
+      const otherPubkey = Keypair.generate().publicKey;
+
+      // Mock getSignaturesForAddress
+      const mockSignatures = vi.spyOn(connection, 'getSignaturesForAddress').mockResolvedValue([
+        {
+          signature: 'test-sig-1',
+          slot: 12345,
+          blockTime: 1234567890,
+          err: null,
+          memo: null,
+        },
+      ]);
+
+      // Mock getParsedTransaction - SOL send transaction
+      const mockTx = vi.spyOn(connection, 'getParsedTransaction').mockResolvedValue({
+        meta: {
+          preBalances: [1000000000, 0], // wallet has 1 SOL, recipient has 0
+          postBalances: [900000000, 100000000], // wallet sends 0.1 SOL
+          preTokenBalances: [],
+          postTokenBalances: [],
+        },
+        transaction: {
+          message: {
+            accountKeys: [
+              { pubkey: walletPubkey },
+              { pubkey: otherPubkey },
+            ],
+            instructions: [],
+          },
+        },
+      } as unknown as web3.ParsedTransactionWithMeta);
+
+      const activities = await wallet.getTransactionActivity(connection, { limit: 10 });
+      expect(activities).toHaveLength(1);
+      expect(activities[0].signature).toBe('test-sig-1');
+      expect(activities[0].type).toBe('send');
+      expect(activities[0].amount).toBeCloseTo(0.1, 6);
+
+      mockSignatures.mockRestore();
+      mockTx.mockRestore();
+    });
+
+    it('should get transaction activity with token transfer', async () => {
+      const walletPubkey = wallet.getPublicKey();
+      const tokenMint = Keypair.generate().publicKey;
+
+      const mockSignatures = vi.spyOn(connection, 'getSignaturesForAddress').mockResolvedValue([
+        {
+          signature: 'token-tx-sig',
+          slot: 12346,
+          blockTime: 1234567891,
+          err: null,
+          memo: null,
+        },
+      ]);
+
+      // Mock getParsedTransaction - Token transfer
+      const mockTx = vi.spyOn(connection, 'getParsedTransaction').mockResolvedValue({
+        meta: {
+          preBalances: [1000000000],
+          postBalances: [1000000000],
+          preTokenBalances: [],
+          postTokenBalances: [
+            {
+              accountIndex: 1,
+              mint: tokenMint.toBase58(),
+              owner: walletPubkey.toBase58(),
+              uiTokenAmount: {
+                uiAmount: 100,
+                decimals: 9,
+                amount: '100000000000',
+                uiAmountString: '100',
+              },
+            },
+          ],
+        },
+        transaction: {
+          message: {
+            accountKeys: [{ pubkey: walletPubkey }],
+            instructions: [],
+          },
+        },
+      } as unknown as web3.ParsedTransactionWithMeta);
+
+      const activities = await wallet.getTransactionActivity(connection);
+      expect(activities).toHaveLength(1);
+      expect(activities[0].type).toBe('receive');
+      expect(activities[0].amount).toBe(100);
+      expect(activities[0].tokenMint).toBe(tokenMint.toBase58());
+
+      mockSignatures.mockRestore();
+      mockTx.mockRestore();
+    });
+
+    it('should handle transactions with errors', async () => {
+      const mockSignatures = vi.spyOn(connection, 'getSignaturesForAddress').mockResolvedValue([
+        {
+          signature: 'error-tx',
+          slot: 12347,
+          blockTime: null,
+          err: { code: 1, message: 'Error' },
+          memo: null,
+        },
+      ]);
+
+      const mockTx = vi.spyOn(connection, 'getParsedTransaction').mockResolvedValue(null);
+
+      const activities = await wallet.getTransactionActivity(connection);
+      expect(activities).toHaveLength(1);
+      expect(activities[0].signature).toBe('error-tx');
+      expect(activities[0].type).toBe('other');
+      expect(activities[0].err).not.toBeNull();
+
+      mockSignatures.mockRestore();
+      mockTx.mockRestore();
+    });
+
+    it('should handle limit option', async () => {
+      const mockSignatures = vi.spyOn(connection, 'getSignaturesForAddress').mockResolvedValue([]);
+
+      await wallet.getTransactionActivity(connection, { limit: 5 });
+      expect(mockSignatures).toHaveBeenCalledWith(
+        wallet.getPublicKey(),
+        expect.objectContaining({ limit: 5 })
+      );
+
+      mockSignatures.mockRestore();
     });
   });
 });
