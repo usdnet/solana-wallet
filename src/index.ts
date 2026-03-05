@@ -16,6 +16,7 @@ export {
   Transaction,
   VersionedTransaction,
   Connection,
+  LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
 export {
   secureWipe,
