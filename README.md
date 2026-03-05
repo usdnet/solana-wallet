@@ -5,11 +5,11 @@ A secure, self-custodial Solana wallet package for web applications. Create wall
 ## Installation
 
 ```bash
-pnpm add solana-wallet
+pnpm add @usdnet/solana-wallet
 # or
-npm install solana-wallet
+npm install @usdnet/solana-wallet
 # or
-yarn add solana-wallet
+yarn add @usdnet/solana-wallet
 ```
 
 ## Quick Start
@@ -17,7 +17,7 @@ yarn add solana-wallet
 ### Create Wallet with Mnemonic
 
 ```typescript
-import { SolanaWallet } from 'solana-wallet';
+import { SolanaWallet } from '@usdnet/solana-wallet';
 
 // Generate mnemonic and create wallet together
 const { wallet, mnemonic } = SolanaWallet.createWithMnemonic();
@@ -60,7 +60,7 @@ const wallet = SolanaWallet.fromPrivateKey('base58-or-base64-or-hex-string');
 ### Store Encrypted Wallet
 
 ```typescript
-import { SolanaWallet, createWalletStorage, StoredWallet } from 'solana-wallet';
+import { SolanaWallet, createWalletStorage, StoredWallet } from '@usdnet/solana-wallet';
 
 // Initialize storage
 const storage = await createWalletStorage('user-password');
