@@ -98,7 +98,7 @@ export class SolanaWallet {
     abortController: AbortController;
     connection: Connection;
     decimals: number;
-    logsAbortController?: AbortController; // For monitoring Token Program logs when account doesn't exist
+    onAccountChangeSubscriptionId?: number;
   }> = new Map();
   private lastKnownBalance: number | null = null;
   private lastKnownTokenBalances: Map<string, TokenBalance | null> = new Map();
@@ -350,7 +350,6 @@ export class SolanaWallet {
 
     const messageBytes = typeof message === 'string' ? new TextEncoder().encode(message) : message;
 
-    // Solana uses nacl.sign.detached for message signing
     return nacl.sign.detached(messageBytes, this.keypair.secretKey);
   }
 
@@ -411,7 +410,6 @@ export class SolanaWallet {
     }
     this.eventListeners.get(event)!.add(listener);
 
-    // Return unsubscribe function
     return () => {
       this.off(event, listener);
     };
@@ -453,7 +451,6 @@ export class SolanaWallet {
         try {
           listener(data);
         } catch (error) {
-          // Silently catch errors in listeners to prevent one bad listener from breaking others
           console.error(`Error in event listener for ${event}:`, error);
         }
       });
@@ -493,7 +490,6 @@ export class SolanaWallet {
       })
       .subscribe({ abortSignal: abortController.signal });
 
-    // Process notifications in background
     (async () => {
       try {
         for await (const notification of accountNotifications) {
@@ -512,7 +508,6 @@ export class SolanaWallet {
           this.lastKnownBalance = newBalance;
         }
       } catch (error) {
-        // Only log if not aborted (abort is expected when stopping)
         if (!abortController.signal.aborted && !this._isCleared) {
           console.error('Error in balance monitoring:', error);
         }
@@ -526,18 +521,15 @@ export class SolanaWallet {
    * @returns WebSocket URL
    */
   private getWebSocketUrl(rpcEndpoint: string): string {
-    // Convert http:// or https:// to ws:// or wss://
     if (rpcEndpoint.startsWith('https://')) {
       return rpcEndpoint.replace('https://', 'wss://');
     }
     if (rpcEndpoint.startsWith('http://')) {
       return rpcEndpoint.replace('http://', 'ws://');
     }
-    // If already a WebSocket URL, return as is
     if (rpcEndpoint.startsWith('ws://') || rpcEndpoint.startsWith('wss://')) {
       return rpcEndpoint;
     }
-    // Default fallback
     return `wss://${rpcEndpoint}`;
   }
 
@@ -546,85 +538,56 @@ export class SolanaWallet {
    * If the account doesn't exist, monitors Token Program logs for account creation
    * @param connection - Solana RPC connection
    * @param tokenMint - Token mint address (PublicKey or string)
-   * @param wsUrl - Optional WebSocket URL (if not provided, derived from connection endpoint)
    */
   async startTokenBalanceMonitoring(
     connection: Connection,
-    tokenMint: PublicKey | string,
-    wsUrl?: string
+    tokenMint: PublicKey | string
   ): Promise<void> {
     this.ensureNotCleared();
 
     const mintPublicKey = typeof tokenMint === 'string' ? new PublicKey(tokenMint) : tokenMint;
     const mintString = mintPublicKey.toString();
 
-    // Stop existing subscription if any
     this.stopTokenBalanceMonitoring(tokenMint);
 
-    // Get associated token address
     const associatedTokenAddress = await getAssociatedTokenAddress(
       mintPublicKey,
       this.keypair.publicKey
     );
 
-    // Get initial balance
     const initialBalance = await this.getTokenBalance(connection, mintPublicKey);
     this.lastKnownTokenBalances.set(mintString, initialBalance);
 
-    // Get and cache token decimals
-    let decimals = 9; // Default fallback
+    let decimals = 9;
     try {
       const mintInfo = await connection.getParsedAccountInfo(mintPublicKey);
       if (mintInfo.value && 'parsed' in mintInfo.value.data) {
         decimals = mintInfo.value.data.parsed.info.decimals;
       }
     } catch {
-      // Use default if we can't get decimals
+      // Ignore
     }
 
-    // Derive WebSocket URL from connection if not provided
-    const websocketUrl = wsUrl || this.getWebSocketUrl(connection.rpcEndpoint);
-
-    // Create Solana Kit RPC subscriptions client
-    const rpcSubscriptions = createSolanaRpcSubscriptions(websocketUrl);
-
-    // Create abort controller for cleanup
     const abortController = new AbortController();
 
-    // Store subscription info
     this.tokenBalanceSubscriptions.set(mintString, { abortController, connection, decimals });
 
-    // If account exists, start account notifications directly
-    if (initialBalance !== null) {
-      this.startAccountNotifications(
-        rpcSubscriptions,
-        associatedTokenAddress,
-        mintPublicKey,
-        mintString,
-        abortController,
-        connection,
-        decimals
-      );
-    } else {
-      // Account doesn't exist - monitor Token Program logs for account creation
-      this.startTokenProgramLogsMonitoring(
-        rpcSubscriptions,
-        associatedTokenAddress,
-        mintPublicKey,
-        mintString,
-        abortController,
-        connection,
-        decimals
-      );
-    }
+    this.startTokenAccountMonitoring(
+      associatedTokenAddress,
+      mintPublicKey,
+      mintString,
+      abortController,
+      connection,
+      decimals
+    );
   }
 
   /**
-   * Start monitoring account notifications for an existing token account
+   * Start monitoring token account using Connection.onAccountChange
+   * Works for both existing and non-existent accounts
    * @private
    */
-  private startAccountNotifications(
-    rpcSubscriptions: ReturnType<typeof createSolanaRpcSubscriptions>,
+  private startTokenAccountMonitoring(
     associatedTokenAddress: PublicKey,
     mintPublicKey: PublicKey,
     mintString: string,
@@ -632,151 +595,12 @@ export class SolanaWallet {
     connection: Connection,
     decimals: number
   ): void {
-    const tokenAccountAddress = address(associatedTokenAddress.toString());
-
-    // Subscribe to token account notifications
-    (async () => {
-      try {
-        const accountNotifications = await rpcSubscriptions
-          .accountNotifications(tokenAccountAddress, {
-            commitment: 'confirmed',
-          })
-          .subscribe({ abortSignal: abortController.signal });
-
-        for await (const notification of accountNotifications) {
-          if (this._isCleared || abortController.signal.aborted) {
-            break;
-          }
-
-          this.processTokenAccountNotification(
-            notification,
-            associatedTokenAddress,
-            mintPublicKey,
-            mintString,
-            connection,
-            decimals
-          );
-        }
-      } catch (error) {
-        // Only log if not aborted
-        if (!abortController.signal.aborted && !this._isCleared) {
-          console.error(`Error in account notifications for ${mintString}:`, error);
-        }
+    const handleAccountChange = (accountInfo: AccountInfo<Buffer> | null) => {
+      if (this._isCleared || abortController.signal.aborted) {
+        return;
       }
-    })();
-  }
 
-  /**
-   * Start monitoring Token Program logs to detect account creation
-   * @private
-   */
-  private startTokenProgramLogsMonitoring(
-    rpcSubscriptions: ReturnType<typeof createSolanaRpcSubscriptions>,
-    associatedTokenAddress: PublicKey,
-    mintPublicKey: PublicKey,
-    mintString: string,
-    abortController: AbortController,
-    connection: Connection,
-    decimals: number
-  ): void {
-    // Create separate abort controller for logs subscription
-    const logsAbortController = new AbortController();
-    const subscription = this.tokenBalanceSubscriptions.get(mintString);
-    if (subscription) {
-      subscription.logsAbortController = logsAbortController;
-    }
-
-    // Subscribe to Token Program logs
-    (async () => {
-      try {
-        const walletPublicKeyString = this.keypair.publicKey.toString();
-        const associatedTokenAddressString = associatedTokenAddress.toString();
-
-        const logsNotifications = await rpcSubscriptions
-          .logsNotifications('all', {
-            commitment: 'confirmed',
-          })
-          .subscribe({ abortSignal: logsAbortController.signal });
-
-        for await (const logNotification of logsNotifications) {
-          if (this._isCleared || abortController.signal.aborted || logsAbortController.signal.aborted) {
-            break;
-          }
-
-          const logMessage = logNotification.value.logs.join(' ');
-
-          // Look for InitializeAccount or Create instructions
-          const isTokenProgramLog = logMessage.includes('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') ||
-            logMessage.includes('Program log: InitializeAccount') ||
-            logMessage.includes('Program log: Create');
-
-          const mentionsOurWallet = logMessage.includes(walletPublicKeyString) ||
-            logMessage.includes(associatedTokenAddressString);
-
-          if (isTokenProgramLog && mentionsOurWallet) {
-            await new Promise((resolve) => setTimeout(resolve, 500));
-
-            const newBalance = await this.getTokenBalance(connection, mintPublicKey);
-            if (newBalance !== null) {
-              logsAbortController.abort();
-
-              const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
-              const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
-              const newAmount = parseFloat(newBalance.amount);
-              const difference = newAmount - previousAmount;
-
-              // Emit account creation event
-              this.emit('tokenBalanceChange', {
-                mint: mintString,
-                previousBalance,
-                newBalance,
-                difference,
-              });
-
-              this.lastKnownTokenBalances.set(mintString, newBalance);
-
-              // Start account notifications
-              this.startAccountNotifications(
-                rpcSubscriptions,
-                associatedTokenAddress,
-                mintPublicKey,
-                mintString,
-                abortController,
-                connection,
-                decimals
-              );
-              break;
-            }
-          }
-        }
-      } catch (error) {
-        // Only log if not aborted
-        if (!logsAbortController.signal.aborted && !abortController.signal.aborted && !this._isCleared) {
-          console.error(`Error in token program logs monitoring for ${mintString}:`, error);
-        }
-      }
-    })();
-  }
-
-  /**
-   * Process a token account notification
-   * @private
-   */
-  private processTokenAccountNotification(
-    notification: { value: { data: string | Uint8Array | Buffer | null; owner: string | PublicKey | null; executable?: boolean; lamports: bigint | number } },
-    associatedTokenAddress: PublicKey,
-    mintPublicKey: PublicKey,
-    mintString: string,
-    connection: Connection,
-    decimals: number
-  ): void {
-    try {
-      // Parse account data directly from notification
-      const accountData = notification.value.data;
-      const accountOwner = notification.value.owner;
-
-      if (!accountData || !accountOwner) {
-        // Account doesn't exist or has been closed
+      if (!accountInfo || !accountInfo.data) {
         const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
         if (previousBalance !== null) {
           this.emit('tokenBalanceChange', {
@@ -792,60 +616,50 @@ export class SolanaWallet {
         return;
       }
 
-      // Convert account data to Buffer for unpackAccount
-      let dataBuffer: Buffer;
-      if (typeof accountData === 'string') {
-        // Base64 encoded string
-        dataBuffer = Buffer.from(accountData, 'base64');
-      } else {
-        // Uint8Array or Buffer
-        dataBuffer = Buffer.from(accountData);
-      }
+      try {
+        const tokenAccount = unpackAccount(associatedTokenAddress, accountInfo, TOKEN_PROGRAM_ID);
+        const amountNumber = Number(tokenAccount.amount);
+        const uiAmount = amountNumber / Math.pow(10, decimals);
 
-      // Parse token account using unpackAccount
-      const ownerPublicKey = typeof accountOwner === 'string' ? new PublicKey(accountOwner) : accountOwner;
-      const accountInfo: AccountInfo<Buffer> = {
-        data: dataBuffer,
-        executable: notification.value.executable ?? false,
-        lamports: Number(notification.value.lamports),
-        owner: ownerPublicKey,
-      };
-
-      const tokenAccount = unpackAccount(associatedTokenAddress, accountInfo, TOKEN_PROGRAM_ID);
-
-      // Calculate UI amount
-      const amountNumber = Number(tokenAccount.amount);
-      const uiAmount = amountNumber / Math.pow(10, decimals);
-
-      // Create new balance object
-      const newBalance: TokenBalance = {
-        mint: mintString,
-        amount: tokenAccount.amount.toString(),
-        decimals,
-        uiAmount,
-      };
-
-      // Compare with previous balance
-      const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
-      const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
-      const newAmount = parseFloat(newBalance.amount);
-      const difference = newAmount - previousAmount;
-
-      if (difference !== 0 || previousBalance === null) {
-        this.emit('tokenBalanceChange', {
+        const newBalance: TokenBalance = {
           mint: mintString,
-          previousBalance,
-          newBalance,
-          difference,
-        });
+          amount: tokenAccount.amount.toString(),
+          decimals,
+          uiAmount,
+        };
+
+        const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
+        const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
+        const newAmount = parseFloat(newBalance.amount);
+        const difference = newAmount - previousAmount;
+
+        if (difference !== 0 || previousBalance === null) {
+          this.emit('tokenBalanceChange', {
+            mint: mintString,
+            previousBalance,
+            newBalance,
+            difference,
+          });
+        }
+
+        this.lastKnownTokenBalances.set(mintString, newBalance);
+      } catch {
+        this.handleTokenBalanceFallback(connection, mintPublicKey, mintString);
       }
-      // Always update last known balance to keep it in sync
-      this.lastKnownTokenBalances.set(mintString, newBalance);
-    } catch {
-      // If parsing fails, fall back to RPC call
-      this.handleTokenBalanceFallback(connection, mintPublicKey, mintString);
+    };
+
+    const subscriptionId = connection.onAccountChange(
+      associatedTokenAddress,
+      handleAccountChange,
+      'confirmed'
+    );
+
+    const subscription = this.tokenBalanceSubscriptions.get(mintString);
+    if (subscription) {
+      subscription.onAccountChangeSubscriptionId = subscriptionId;
     }
   }
+
 
   /**
    * Fallback to RPC call when parsing fails
@@ -873,7 +687,7 @@ export class SolanaWallet {
       }
       this.lastKnownTokenBalances.set(mintString, newBalance);
     } catch {
-      // Silently handle errors
+      // Handle errors silently
     }
   }
 
@@ -900,8 +714,8 @@ export class SolanaWallet {
 
     if (subscription) {
       subscription.abortController.abort();
-      if (subscription.logsAbortController) {
-        subscription.logsAbortController.abort();
+      if (subscription.onAccountChangeSubscriptionId !== undefined) {
+        subscription.connection.removeAccountChangeListener(subscription.onAccountChangeSubscriptionId);
       }
       this.tokenBalanceSubscriptions.delete(mintString);
       this.lastKnownTokenBalances.delete(mintString);
@@ -914,8 +728,8 @@ export class SolanaWallet {
   stopAllTokenBalanceMonitoring(): void {
     this.tokenBalanceSubscriptions.forEach((subscription) => {
       subscription.abortController.abort();
-      if (subscription.logsAbortController) {
-        subscription.logsAbortController.abort();
+      if (subscription.onAccountChangeSubscriptionId !== undefined) {
+        subscription.connection.removeAccountChangeListener(subscription.onAccountChangeSubscriptionId);
       }
     });
     this.tokenBalanceSubscriptions.clear();
@@ -961,7 +775,6 @@ export class SolanaWallet {
     try {
       const tokenAccount = await getAccount(connection, associatedTokenAddress);
 
-      // Get mint info to get decimals
       const mintInfo = await connection.getParsedAccountInfo(mintPublicKey);
       let decimals = 9; // Default fallback
       if (mintInfo.value && 'parsed' in mintInfo.value.data) {
@@ -978,7 +791,6 @@ export class SolanaWallet {
         uiAmount,
       };
     } catch {
-      // Account doesn't exist, return null
       return null;
     }
   }
@@ -1048,7 +860,6 @@ export class SolanaWallet {
       }
     );
 
-    // Emit balance change event
     try {
       const newBalance = await this.getBalance(connection);
       if (previousBalance !== newBalance) {
@@ -1059,7 +870,7 @@ export class SolanaWallet {
         });
       }
     } catch {
-      // Silently handle errors when fetching balance after send
+      // Ignore
     }
 
     return signature;
@@ -1090,11 +901,8 @@ export class SolanaWallet {
     const mintPublicKey = typeof tokenMint === 'string' ? new PublicKey(tokenMint) : tokenMint;
     const toPublicKey = typeof to === 'string' ? new PublicKey(to) : to;
 
-    // Get source and destination token accounts
     const fromTokenAddress = await getAssociatedTokenAddress(mintPublicKey, this.keypair.publicKey);
     const toTokenAddress = await getAssociatedTokenAddress(mintPublicKey, toPublicKey);
-
-    // Get token decimals if not provided
     let decimals = options?.decimals;
     if (!decimals) {
       try {
@@ -1109,7 +917,6 @@ export class SolanaWallet {
       }
     }
 
-    // Convert amount to token's smallest unit
     const finalDecimals = decimals || 9;
     const amountInSmallestUnit = BigInt(Math.floor(amount * Math.pow(10, finalDecimals)));
 
@@ -1136,7 +943,6 @@ export class SolanaWallet {
       }
     );
 
-    // Emit token balance change event
     try {
       const newTokenBalance = await this.getTokenBalance(connection, mintPublicKey);
       const previousAmount = previousTokenBalance ? parseFloat(previousTokenBalance.amount) : 0;
@@ -1152,7 +958,7 @@ export class SolanaWallet {
         });
       }
     } catch {
-      // Silently handle errors when fetching token balance after send
+      // Ignore
     }
 
     return signature;
@@ -1195,7 +1001,6 @@ export class SolanaWallet {
         const activity = this.parseTransactionActivity(sigInfo, tx, this.keypair.publicKey);
         activities.push(activity);
       } catch {
-        // If we can't parse the transaction, add basic info
         activities.push({
           signature: sigInfo.signature,
           slot: sigInfo.slot,
@@ -1234,7 +1039,6 @@ export class SolanaWallet {
     let tokenMint: string | undefined;
     let memo: string | undefined;
 
-    // Check for memo
     if (tx.transaction.message.instructions) {
       for (const ix of tx.transaction.message.instructions) {
         if ('parsed' in ix && ix.parsed?.type === 'memo') {
@@ -1243,13 +1047,11 @@ export class SolanaWallet {
       }
     }
 
-    // Find wallet's account index
     const accountKeys = tx.transaction.message.accountKeys.map((key) =>
       typeof key === 'string' ? key : key.pubkey.toBase58()
     );
     const walletIndex = accountKeys.findIndex((key) => key === walletAddress);
 
-    // Check for SOL transfers
     if (walletIndex >= 0) {
       const preBalance = tx.meta.preBalances[walletIndex] || 0;
       const postBalance = tx.meta.postBalances[walletIndex] || 0;
@@ -1261,14 +1063,12 @@ export class SolanaWallet {
       }
     }
 
-    // Check for token transfers
     if (tx.meta.postTokenBalances && tx.meta.postTokenBalances.length > 0) {
       for (const balance of tx.meta.postTokenBalances) {
         if (balance.owner === walletAddress) {
           tokenMint = balance.mint;
           const uiAmount = balance.uiTokenAmount.uiAmount;
           if (uiAmount && uiAmount !== 0) {
-            // Token transfers override SOL transfers
             type = uiAmount > 0 ? 'receive' : 'send';
             amount = Math.abs(uiAmount);
           }
@@ -1297,13 +1097,8 @@ export class SolanaWallet {
       return;
     }
 
-    // Stop balance monitoring
     this.stopBalanceMonitoring();
-
-    // Stop all token balance monitoring
     this.stopAllTokenBalanceMonitoring();
-
-    // Remove all event listeners
     this.removeAllListeners();
 
     secureWipe(this.keypair.secretKey);
