@@ -1475,7 +1475,12 @@ describe('SolanaWallet', () => {
               value: {
                 signature: 'test-signature',
                 err: null,
-                logs: ['Program log: InitializeAccount', `Program ${associatedTokenAddress.toString()} invoke [1]`],
+                logs: [
+                  'Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [1]',
+                  'Program log: InitializeAccount',
+                  `Program ${wallet.getPublicKey().toString()} invoke [1]`,
+                  `Program ${associatedTokenAddress.toString()} invoke [1]`,
+                ],
               },
               context: { slot: BigInt(12345) },
             };
@@ -1615,13 +1620,19 @@ describe('SolanaWallet', () => {
         });
 
         // Mock logs notifications for account creation detection
+        // Include wallet address and associated token address in logs so filtering works
         const logsAsyncGenerator2 = {
           [Symbol.asyncIterator]: async function* () {
             yield {
               value: {
                 signature: 'test-signature',
                 err: null,
-                logs: ['Program log: InitializeAccount', `Program ${associatedTokenAddress.toString()} invoke [1]`],
+                logs: [
+                  'Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [1]',
+                  'Program log: InitializeAccount',
+                  `Program ${wallet.getPublicKey().toString()} invoke [1]`,
+                  `Program ${associatedTokenAddress.toString()} invoke [1]`,
+                ],
               },
               context: { slot: BigInt(12345) },
             };

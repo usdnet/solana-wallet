@@ -689,9 +689,11 @@ export class SolanaWallet {
     // Subscribe to Token Program logs
     (async () => {
       try {
-        const accountAddress = address(associatedTokenAddress.toString());
+        const walletPublicKeyString = this.keypair.publicKey.toString();
+        const associatedTokenAddressString = associatedTokenAddress.toString();
+
         const logsNotifications = await rpcSubscriptions
-          .logsNotifications({ mentions: [accountAddress] }, {
+          .logsNotifications('all', {
             commitment: 'confirmed',
           })
           .subscribe({ abortSignal: logsAbortController.signal });
@@ -701,20 +703,23 @@ export class SolanaWallet {
             break;
           }
 
-          // Check if this log is related to our token account creation
           const logMessage = logNotification.value.logs.join(' ');
 
           // Look for InitializeAccount or Create instructions
-          if (logMessage.includes('InitializeAccount') || logMessage.includes('Create')) {
-            // Account was created - switch to account notifications
-            logsAbortController.abort();
+          const isTokenProgramLog = logMessage.includes('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') ||
+            logMessage.includes('Program log: InitializeAccount') ||
+            logMessage.includes('Program log: Create');
 
-            // Small delay to ensure account is fully initialized
+          const mentionsOurWallet = logMessage.includes(walletPublicKeyString) ||
+            logMessage.includes(associatedTokenAddressString);
+
+          if (isTokenProgramLog && mentionsOurWallet) {
             await new Promise((resolve) => setTimeout(resolve, 500));
 
-            // Get the new balance
             const newBalance = await this.getTokenBalance(connection, mintPublicKey);
             if (newBalance !== null) {
+              logsAbortController.abort();
+
               const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
               const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
               const newAmount = parseFloat(newBalance.amount);
@@ -740,6 +745,7 @@ export class SolanaWallet {
                 connection,
                 decimals
               );
+              break;
             }
           }
         }
