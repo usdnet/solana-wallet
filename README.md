@@ -147,7 +147,7 @@ const connection = new Connection('https://api.mainnet-beta.solana.com');
 const tokenMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'); // USDC
 const recipient = new PublicKey('RecipientAddressHere');
 
-// Send 100 tokens (with 6 decimals)
+// Send 100 tokens (human 6 decimals). The wallet converts this to the smallest unit using `decimals`.
 const signature = await wallet.sendToken(connection, tokenMint, recipient, 100, {
   decimals: 6, // Optional: auto-detected if not provided
 });
@@ -250,11 +250,12 @@ await wallet.sendSol(connection, recipient, 0.1);
 - `getPublicKey()` - Get PublicKey object
 - `getPrivateKey()` - Get private key as Uint8Array
 - `getPrivateKeyBase58()` / `getPrivateKeyBase64()` / `getPrivateKeyHex()` - Get private key in various formats
+- `getDerivationPath()` - Get derivation path used for mnemonic-derived wallets
 - `getBalance(connection)` - Get SOL balance (returns number in SOL)
 - `getTokenBalance(connection, tokenMint)` - Get SPL token balance for specific token
 - `getAllTokenBalances(connection)` - Get all SPL token balances
 - `sendSol(connection, to, amount, options?)` - Send SOL to another address
-- `sendToken(connection, tokenMint, to, amount, options?)` - Send SPL tokens to another address
+- `sendToken(connection, tokenMint, to, amount, options?)` - Send SPL tokens to another address (amount is in human units; converted using decimals)
 - `getTransactionActivity(connection, options?)` - Get transaction history
 - `signTransaction(transaction)` - Sign transaction
 - `signMessage(message)` - Sign message (returns Uint8Array)
@@ -266,7 +267,7 @@ await wallet.sendSol(connection, recipient, 0.1);
 - `removeAllListeners(event?)` - Remove all listeners for an event type
 - `startBalanceMonitoring(connection, wsUrl?)` - Start monitoring balance changes using Solana Kit WebSocket subscriptions
 - `stopBalanceMonitoring()` - Stop monitoring balance changes
-- `startTokenBalanceMonitoring(connection, tokenMint, wsUrl?)` - Start monitoring token balance changes using Solana Kit
+- `startTokenBalanceMonitoring(connection, tokenMint)` - Start monitoring token balance changes
 - `stopTokenBalanceMonitoring(tokenMint)` - Stop monitoring specific token balance
 - `stopAllTokenBalanceMonitoring()` - Stop all token balance monitoring
 - `isBalanceMonitoringActive()` - Check if balance monitoring is active
@@ -312,10 +313,9 @@ await wallet.sendSol(connection, recipient, 0.1);
 
 **Note:** 
 - Balance change events are automatically emitted when you call `sendSol()` or `sendToken()`.
-- `startBalanceMonitoring()` uses **Solana Kit** (`@solana/kit`) with `accountNotifications` for real-time, event-driven WebSocket subscriptions - no polling, no memory leaks, type-safe.
-- `startTokenBalanceMonitoring()` monitors specific SPL token balances using Solana Kit WebSocket subscriptions.
-- The implementation uses async generators and `AbortController` for efficient, leak-free subscriptions (modern Solana Kit approach).
-- WebSocket URL is automatically derived from the connection endpoint, or you can provide it explicitly.
+- `startBalanceMonitoring()` uses **Solana Kit** (`@solana/kit`) `accountNotifications` for real-time, event-driven WebSocket subscriptions (async generator + `AbortController`).
+- `startTokenBalanceMonitoring()` monitors the token’s associated token account using `Connection.onAccountChange` (and falls back to an RPC fetch if parsing fails).
+- WebSocket URL for `startBalanceMonitoring()` is automatically derived from `connection.rpcEndpoint`, or you can provide it explicitly.
 
 ## Development
 
