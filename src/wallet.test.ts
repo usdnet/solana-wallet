@@ -1134,6 +1134,263 @@ describe('SolanaWallet', () => {
         getTokenBalanceSpy.mockRestore();
         sendAndConfirmSpy.mockRestore();
       });
+
+      it('should parse token account data from notification and emit balance changes', async () => {
+        const tokenBalanceChangeListener = vi.fn();
+        wallet.on('tokenBalanceChange', tokenBalanceChangeListener);
+
+        const tokenMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+        const associatedTokenAddress = new PublicKey('11111111111111111111111111111114');
+
+        // Mock getAssociatedTokenAddress
+        vi.mocked(splToken.getAssociatedTokenAddress).mockResolvedValue(associatedTokenAddress);
+
+        // Mock initial balance
+        const initialBalance = {
+          mint: tokenMint.toString(),
+          amount: '1000000000', // 1000 tokens with 6 decimals
+          decimals: 6,
+          uiAmount: 1000,
+        };
+        vi.spyOn(wallet, 'getTokenBalance').mockResolvedValue(initialBalance);
+
+        // Mock getParsedAccountInfo for decimals
+        const mockParsedData: web3.ParsedAccountData = {
+          program: 'spl-token',
+          parsed: {
+            info: {
+              decimals: 6,
+            },
+          },
+          space: 0,
+        };
+        vi.spyOn(connection, 'getParsedAccountInfo').mockResolvedValue({
+          value: {
+            executable: false,
+            owner: Keypair.generate().publicKey,
+            lamports: 0,
+            data: mockParsedData,
+          },
+          context: { slot: 0 },
+        });
+
+        // Create mock token account data for different balances
+        // Token account structure: mint (32) + owner (32) + amount (8) + delegateOption (4) + state (1) + isNativeOption (4) + delegatedAmount (8) + closeAuthorityOption (4)
+        const createTokenAccountData = (amount: bigint): Buffer => {
+          const buffer = Buffer.alloc(165); // Standard token account size
+          // Mint (32 bytes at offset 0)
+          tokenMint.toBuffer().copy(buffer, 0);
+          // Owner (32 bytes at offset 32) - wallet public key
+          wallet.getPublicKey().toBuffer().copy(buffer, 32);
+          // Amount (8 bytes, little-endian u64 at offset 64)
+          buffer.writeBigUInt64LE(amount, 64);
+          // DelegateOption (4 bytes at offset 72) - 0 = None
+          buffer.writeUInt32LE(0, 72);
+          // State (1 byte at offset 76) - 1 = initialized
+          buffer[76] = 1;
+          // IsNativeOption (4 bytes at offset 77) - 0 = None
+          buffer.writeUInt32LE(0, 77);
+          // DelegatedAmount (8 bytes at offset 81) - 0
+          buffer.writeBigUInt64LE(BigInt(0), 81);
+          // CloseAuthorityOption (4 bytes at offset 89) - 0 = None
+          buffer.writeUInt32LE(0, 89);
+          // Rest can be zeros
+          return buffer;
+        };
+
+        const { createSolanaRpcSubscriptions } = await import('@solana/kit');
+        const mockAbortController = { signal: { aborted: false }, abort: vi.fn() };
+
+        // Create notifications with different balances
+        const notifications = [
+          {
+            value: {
+              data: createTokenAccountData(BigInt('1500000000')), // 1500 tokens
+              owner: splToken.TOKEN_PROGRAM_ID.toString(),
+              lamports: BigInt(2039280), // Rent-exempt reserve
+              executable: false,
+            },
+          },
+          {
+            value: {
+              data: createTokenAccountData(BigInt('2000000000')), // 2000 tokens
+              owner: splToken.TOKEN_PROGRAM_ID.toString(),
+              lamports: BigInt(2039280),
+              executable: false,
+            },
+          },
+        ];
+
+        const mockAsyncGenerator = {
+          [Symbol.asyncIterator]: async function* () {
+            for (const notification of notifications) {
+              yield notification;
+            }
+          },
+        };
+
+        const mockSubscribe = vi.fn().mockResolvedValue(mockAsyncGenerator);
+        const mockAccountNotifications = vi.fn().mockReturnValue({
+          subscribe: mockSubscribe,
+        });
+
+        const mockRpc = {
+          accountNotifications: mockAccountNotifications,
+          logsNotifications: vi.fn(),
+          programNotifications: vi.fn(),
+          rootNotifications: vi.fn(),
+          signatureNotifications: vi.fn(),
+          slotNotifications: vi.fn(),
+        };
+        vi.mocked(createSolanaRpcSubscriptions).mockReturnValue(
+          mockRpc satisfies ReturnType<typeof createSolanaRpcSubscriptions>
+        );
+
+        vi.spyOn(global, 'AbortController').mockImplementation(() => {
+          const mockAbortControllerTyped: Partial<AbortController> = {
+            signal: mockAbortController.signal as AbortSignal,
+            abort: mockAbortController.abort,
+          };
+          return mockAbortControllerTyped as AbortController;
+        });
+
+        // Start monitoring
+        await wallet.startTokenBalanceMonitoring(connection, tokenMint);
+
+        // Wait for async processing
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        // Verify events were emitted
+        expect(tokenBalanceChangeListener).toHaveBeenCalledTimes(2);
+
+        // First notification: 1000 -> 1500 tokens (difference: +500 tokens = +500000000 raw)
+        expect(tokenBalanceChangeListener).toHaveBeenNthCalledWith(1, {
+          mint: tokenMint.toString(),
+          previousBalance: initialBalance,
+          newBalance: {
+            mint: tokenMint.toString(),
+            amount: '1500000000',
+            decimals: 6,
+            uiAmount: 1500,
+          },
+          difference: 500000000, // 1500000000 - 1000000000
+        });
+
+        // Second notification: 1500 -> 2000 tokens (difference: +500 tokens = +500000000 raw)
+        expect(tokenBalanceChangeListener).toHaveBeenNthCalledWith(2, {
+          mint: tokenMint.toString(),
+          previousBalance: {
+            mint: tokenMint.toString(),
+            amount: '1500000000',
+            decimals: 6,
+            uiAmount: 1500,
+          },
+          newBalance: {
+            mint: tokenMint.toString(),
+            amount: '2000000000',
+            decimals: 6,
+            uiAmount: 2000,
+          },
+          difference: 500000000, // 2000000000 - 1500000000
+        });
+
+        wallet.stopTokenBalanceMonitoring(tokenMint);
+      });
+
+      it('should handle account closure in token balance monitoring', async () => {
+        const tokenBalanceChangeListener = vi.fn();
+        wallet.on('tokenBalanceChange', tokenBalanceChangeListener);
+
+        const tokenMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+        const associatedTokenAddress = new PublicKey('11111111111111111111111111111114');
+
+        vi.mocked(splToken.getAssociatedTokenAddress).mockResolvedValue(associatedTokenAddress);
+
+        const initialBalance = {
+          mint: tokenMint.toString(),
+          amount: '1000000000',
+          decimals: 6,
+          uiAmount: 1000,
+        };
+        vi.spyOn(wallet, 'getTokenBalance').mockResolvedValue(initialBalance);
+
+        const mockParsedData: web3.ParsedAccountData = {
+          program: 'spl-token',
+          parsed: {
+            info: {
+              decimals: 6,
+            },
+          },
+          space: 0,
+        };
+        vi.spyOn(connection, 'getParsedAccountInfo').mockResolvedValue({
+          value: {
+            executable: false,
+            owner: Keypair.generate().publicKey,
+            lamports: 0,
+            data: mockParsedData,
+          },
+          context: { slot: 0 },
+        });
+
+        const { createSolanaRpcSubscriptions } = await import('@solana/kit');
+        const mockAbortController = { signal: { aborted: false }, abort: vi.fn() };
+
+        // Notification with null data (account closed)
+        const mockAsyncGenerator = {
+          [Symbol.asyncIterator]: async function* () {
+            yield {
+              value: {
+                data: null,
+                owner: null,
+                lamports: BigInt(0),
+                executable: false,
+              },
+            };
+          },
+        };
+
+        const mockSubscribe = vi.fn().mockResolvedValue(mockAsyncGenerator);
+        const mockAccountNotifications = vi.fn().mockReturnValue({
+          subscribe: mockSubscribe,
+        });
+
+        const mockRpc = {
+          accountNotifications: mockAccountNotifications,
+          logsNotifications: vi.fn(),
+          programNotifications: vi.fn(),
+          rootNotifications: vi.fn(),
+          signatureNotifications: vi.fn(),
+          slotNotifications: vi.fn(),
+        };
+        vi.mocked(createSolanaRpcSubscriptions).mockReturnValue(
+          mockRpc satisfies ReturnType<typeof createSolanaRpcSubscriptions>
+        );
+
+        vi.spyOn(global, 'AbortController').mockImplementation(() => {
+          const mockAbortControllerTyped: Partial<AbortController> = {
+            signal: mockAbortController.signal as AbortSignal,
+            abort: mockAbortController.abort,
+          };
+          return mockAbortControllerTyped as AbortController;
+        });
+
+        await wallet.startTokenBalanceMonitoring(connection, tokenMint);
+
+        // Wait for async processing
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        // Verify event was emitted for account closure
+        expect(tokenBalanceChangeListener).toHaveBeenCalledTimes(1);
+        expect(tokenBalanceChangeListener).toHaveBeenCalledWith({
+          mint: tokenMint.toString(),
+          previousBalance: initialBalance,
+          newBalance: null,
+          difference: -1000000000, // Negative difference (balance went to 0)
+        });
+
+        wallet.stopTokenBalanceMonitoring(tokenMint);
+      });
     });
 
     describe('balance monitoring lifecycle', () => {
@@ -1214,6 +1471,26 @@ describe('SolanaWallet', () => {
         vi.mocked(createSolanaRpcSubscriptions).mockReturnValue(
           mockRpc4 satisfies ReturnType<typeof createSolanaRpcSubscriptions>
         );
+
+        // Mock getParsedAccountInfo for decimals
+        const mockParsedData: web3.ParsedAccountData = {
+          program: 'spl-token',
+          parsed: {
+            info: {
+              decimals: 9,
+            },
+          },
+          space: 0,
+        };
+        vi.spyOn(connection, 'getParsedAccountInfo').mockResolvedValue({
+          value: {
+            executable: false,
+            owner: Keypair.generate().publicKey,
+            lamports: 0,
+            data: mockParsedData,
+          },
+          context: { slot: 0 },
+        });
 
         vi.spyOn(wallet, 'getTokenBalance').mockResolvedValue(null);
 

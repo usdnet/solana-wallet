@@ -13,9 +13,10 @@ import {
   sendAndConfirmTransaction,
   ParsedTransactionWithMeta,
   ConfirmedSignatureInfo,
+  AccountInfo,
 } from '@solana/web3.js';
 import { address, createSolanaRpcSubscriptions } from '@solana/kit';
-import { getAccount, getAssociatedTokenAddress, createTransferInstruction, TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { getAccount, getAssociatedTokenAddress, createTransferInstruction, TOKEN_PROGRAM_ID, unpackAccount } from '@solana/spl-token';
 import * as bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
 import * as nacl from 'tweetnacl';
@@ -93,7 +94,7 @@ export class SolanaWallet {
   > = new Map();
   private balanceMonitorAbortController: AbortController | null = null;
   private balanceMonitorConnection: Connection | null = null;
-  private tokenBalanceSubscriptions: Map<string, { abortController: AbortController; connection: Connection }> = new Map();
+  private tokenBalanceSubscriptions: Map<string, { abortController: AbortController; connection: Connection; decimals: number }> = new Map();
   private lastKnownBalance: number | null = null;
   private lastKnownTokenBalances: Map<string, TokenBalance | null> = new Map();
 
@@ -564,6 +565,17 @@ export class SolanaWallet {
     const initialBalance = await this.getTokenBalance(connection, mintPublicKey);
     this.lastKnownTokenBalances.set(mintString, initialBalance);
 
+    // Get and cache token decimals
+    let decimals = 9; // Default fallback
+    try {
+      const mintInfo = await connection.getParsedAccountInfo(mintPublicKey);
+      if (mintInfo.value && 'parsed' in mintInfo.value.data) {
+        decimals = mintInfo.value.data.parsed.info.decimals;
+      }
+    } catch {
+      // Use default if we can't get decimals
+    }
+
     // Derive WebSocket URL from connection if not provided
     const websocketUrl = wsUrl || this.getWebSocketUrl(connection.rpcEndpoint);
 
@@ -582,21 +594,77 @@ export class SolanaWallet {
       .subscribe({ abortSignal: abortController.signal });
 
     // Store subscription info
-    this.tokenBalanceSubscriptions.set(mintString, { abortController, connection });
+    this.tokenBalanceSubscriptions.set(mintString, { abortController, connection, decimals });
 
     // Process notifications in background
     (async () => {
       try {
-        for await (const _notification of accountNotifications) {
+        for await (const notification of accountNotifications) {
           if (this._isCleared || abortController.signal.aborted) {
             break;
           }
 
           try {
-            const newBalance = await this.getTokenBalance(connection, mintPublicKey);
+            // Parse account data directly from notification
+            const accountData = notification.value.data;
+            const accountOwner = notification.value.owner;
+
+            if (!accountData || !accountOwner) {
+              // Account might have been closed
+              const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
+              if (previousBalance !== null) {
+                this.emit('tokenBalanceChange', {
+                  mint: mintString,
+                  previousBalance,
+                  newBalance: null,
+                  difference: -parseFloat(previousBalance.amount),
+                });
+                this.lastKnownTokenBalances.set(mintString, null);
+              }
+              continue;
+            }
+
+            // Convert account data to Buffer for unpackAccount
+            let dataBuffer: Buffer;
+            if (typeof accountData === 'string') {
+              // Base64 encoded string
+              dataBuffer = Buffer.from(accountData, 'base64');
+            } else {
+              // Uint8Array or Buffer
+              dataBuffer = Buffer.from(accountData);
+            }
+
+            // Parse token account using unpackAccount
+            const ownerPublicKey = typeof accountOwner === 'string' ? new PublicKey(accountOwner) : accountOwner;
+            const accountInfo: AccountInfo<Buffer> = {
+              data: dataBuffer,
+              executable: notification.value.executable ?? false,
+              lamports: Number(notification.value.lamports),
+              owner: ownerPublicKey,
+            };
+
+            const tokenAccount = unpackAccount(associatedTokenAddress, accountInfo, TOKEN_PROGRAM_ID);
+
+            // Get cached decimals
+            const subscription = this.tokenBalanceSubscriptions.get(mintString);
+            const tokenDecimals = subscription?.decimals ?? decimals;
+
+            // Calculate UI amount
+            const amountNumber = Number(tokenAccount.amount);
+            const uiAmount = amountNumber / Math.pow(10, tokenDecimals);
+
+            // Create new balance object
+            const newBalance: TokenBalance = {
+              mint: mintString,
+              amount: tokenAccount.amount.toString(),
+              decimals: tokenDecimals,
+              uiAmount,
+            };
+
+            // Compare with previous balance
             const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
             const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
-            const newAmount = newBalance ? parseFloat(newBalance.amount) : 0;
+            const newAmount = parseFloat(newBalance.amount);
             const difference = newAmount - previousAmount;
 
             if (difference !== 0) {
@@ -610,7 +678,26 @@ export class SolanaWallet {
             // Always update last known balance to keep it in sync
             this.lastKnownTokenBalances.set(mintString, newBalance);
           } catch {
-            // Silently handle errors
+            // If parsing fails, fall back to RPC call
+            try {
+              const newBalance = await this.getTokenBalance(connection, mintPublicKey);
+              const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
+              const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
+              const newAmount = newBalance ? parseFloat(newBalance.amount) : 0;
+              const difference = newAmount - previousAmount;
+
+              if (difference !== 0) {
+                this.emit('tokenBalanceChange', {
+                  mint: mintString,
+                  previousBalance,
+                  newBalance,
+                  difference,
+                });
+              }
+              this.lastKnownTokenBalances.set(mintString, newBalance);
+            } catch {
+              // Silently handle errors
+            }
           }
         }
       } catch (error) {
