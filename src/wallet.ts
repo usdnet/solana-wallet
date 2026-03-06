@@ -610,7 +610,7 @@ export class SolanaWallet {
             const accountOwner = notification.value.owner;
 
             if (!accountData || !accountOwner) {
-              // Account might have been closed
+              // Account doesn't exist or has been closed
               const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
               if (previousBalance !== null) {
                 this.emit('tokenBalanceChange', {
@@ -619,6 +619,8 @@ export class SolanaWallet {
                   newBalance: null,
                   difference: -parseFloat(previousBalance.amount),
                 });
+                this.lastKnownTokenBalances.set(mintString, null);
+              } else {
                 this.lastKnownTokenBalances.set(mintString, null);
               }
               continue;
@@ -667,7 +669,7 @@ export class SolanaWallet {
             const newAmount = parseFloat(newBalance.amount);
             const difference = newAmount - previousAmount;
 
-            if (difference !== 0) {
+            if (difference !== 0 || previousBalance === null) {
               this.emit('tokenBalanceChange', {
                 mint: mintString,
                 previousBalance,
@@ -686,7 +688,7 @@ export class SolanaWallet {
               const newAmount = newBalance ? parseFloat(newBalance.amount) : 0;
               const difference = newAmount - previousAmount;
 
-              if (difference !== 0) {
+              if (difference !== 0 || (previousBalance === null && newBalance !== null) || (previousBalance !== null && newBalance === null)) {
                 this.emit('tokenBalanceChange', {
                   mint: mintString,
                   previousBalance,
