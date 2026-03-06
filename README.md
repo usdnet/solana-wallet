@@ -173,6 +173,52 @@ for (const activity of activities) {
 }
 ```
 
+### Listen to Balance Changes
+
+```typescript
+import { Connection } from '@solana/web3.js';
+
+const connection = new Connection('https://api.mainnet-beta.solana.com');
+
+// Listen to SOL balance changes
+const unsubscribe = wallet.on('balanceChange', (event) => {
+  console.log(`Balance changed from ${event.previousBalance} to ${event.newBalance}`);
+  console.log(`Difference: ${event.difference > 0 ? '+' : ''}${event.difference} SOL`);
+});
+
+// Start monitoring balance using Solana Kit WebSocket subscriptions
+await wallet.startBalanceMonitoring(connection);
+// Optionally provide WebSocket URL: await wallet.startBalanceMonitoring(connection, 'wss://api.mainnet-beta.solana.com');
+
+// Stop monitoring when done
+wallet.stopBalanceMonitoring();
+
+// Remove listener
+unsubscribe();
+
+// Listen to token balance changes
+wallet.on('tokenBalanceChange', (event) => {
+  console.log(`Token ${event.mint} balance changed`);
+  console.log(`Previous: ${event.previousBalance?.uiAmount || 0}`);
+  console.log(`New: ${event.newBalance?.uiAmount || 0}`);
+  console.log(`Difference: ${event.difference}`);
+});
+
+// Start monitoring specific token balance
+const tokenMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // USDC
+await wallet.startTokenBalanceMonitoring(connection, tokenMint);
+
+// Stop monitoring specific token
+wallet.stopTokenBalanceMonitoring(tokenMint);
+
+// Stop all token monitoring
+wallet.stopAllTokenBalanceMonitoring();
+
+// Balance change events are also emitted automatically when you send SOL or tokens
+await wallet.sendSol(connection, recipient, 0.1);
+// This will automatically emit a 'balanceChange' event
+```
+
 ## Security
 
 **⚠️ Never store private keys or seed phrases in:**
@@ -215,6 +261,15 @@ for (const activity of activities) {
 - `signMessageBase64(message)` / `signMessageBase58(message)` - Sign message in specific format
 - `verifyMessage(message, signature)` - Verify message signature
 - `encryptForStorage(password)` - Encrypt wallet for storage
+- `on(event, listener)` - Add event listener (returns unsubscribe function)
+- `off(event, listener)` - Remove event listener
+- `removeAllListeners(event?)` - Remove all listeners for an event type
+- `startBalanceMonitoring(connection, wsUrl?)` - Start monitoring balance changes using Solana Kit WebSocket subscriptions
+- `stopBalanceMonitoring()` - Stop monitoring balance changes
+- `startTokenBalanceMonitoring(connection, tokenMint, wsUrl?)` - Start monitoring token balance changes using Solana Kit
+- `stopTokenBalanceMonitoring(tokenMint)` - Stop monitoring specific token balance
+- `stopAllTokenBalanceMonitoring()` - Stop all token balance monitoring
+- `isBalanceMonitoringActive()` - Check if balance monitoring is active
 - `clear()` - Securely clear wallet from memory
 - `isCleared()` - Check if wallet is cleared
 
@@ -246,6 +301,21 @@ for (const activity of activities) {
 - `secureRandomBytes(length)` - Generate secure random bytes
 - `encryptData(data, key)` / `decryptData(encrypted, iv, key)` - Encrypt/decrypt data
 - `createSecureStorageKey(password, salt?)` - Create storage key with PBKDF2
+
+### Events
+
+**Event Types:**
+- `balanceChange` - Emitted when SOL balance changes
+  - Event data: `{ previousBalance: number, newBalance: number, difference: number }`
+- `tokenBalanceChange` - Emitted when SPL token balance changes
+  - Event data: `{ mint: string, previousBalance: TokenBalance | null, newBalance: TokenBalance | null, difference: number }`
+
+**Note:** 
+- Balance change events are automatically emitted when you call `sendSol()` or `sendToken()`.
+- `startBalanceMonitoring()` uses **Solana Kit** (`@solana/kit`) with `accountNotifications` for real-time, event-driven WebSocket subscriptions - no polling, no memory leaks, type-safe.
+- `startTokenBalanceMonitoring()` monitors specific SPL token balances using Solana Kit WebSocket subscriptions.
+- The implementation uses async generators and `AbortController` for efficient, leak-free subscriptions (modern Solana Kit approach).
+- WebSocket URL is automatically derived from the connection endpoint, or you can provide it explicitly.
 
 ## Development
 

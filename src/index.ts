@@ -9,6 +9,10 @@ export {
   WalletWithMnemonic,
   TokenBalance,
   TransactionActivity,
+  BalanceChangeEvent,
+  TokenBalanceChangeEvent,
+  WalletEventType,
+  WalletEventListener,
 } from './wallet';
 export {
   Keypair,

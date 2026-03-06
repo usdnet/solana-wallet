@@ -14,6 +14,7 @@ import {
   ParsedTransactionWithMeta,
   ConfirmedSignatureInfo,
 } from '@solana/web3.js';
+import { address, createSolanaRpcSubscriptions } from '@solana/kit';
 import { getAccount, getAssociatedTokenAddress, createTransferInstruction, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import * as bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
@@ -62,6 +63,23 @@ export interface TransactionActivity {
   tokenMint?: string;
 }
 
+export interface BalanceChangeEvent {
+  previousBalance: number;
+  newBalance: number;
+  difference: number;
+}
+
+export interface TokenBalanceChangeEvent {
+  mint: string;
+  previousBalance: TokenBalance | null;
+  newBalance: TokenBalance | null;
+  difference: number;
+}
+
+export type WalletEventType = 'balanceChange' | 'tokenBalanceChange';
+
+export type WalletEventListener<T = unknown> = (data: T) => void;
+
 /**
  * Self-custodial Solana wallet class
  */
@@ -69,6 +87,14 @@ export class SolanaWallet {
   private keypair: Keypair;
   private derivationPath: string;
   private _isCleared: boolean = false;
+  private eventListeners: Map<
+    WalletEventType,
+    Set<(data: BalanceChangeEvent | TokenBalanceChangeEvent) => void>
+  > = new Map();
+  private balanceMonitorAbortController: AbortController | null = null;
+  private balanceMonitorConnection: Connection | null = null;
+  private tokenBalanceSubscriptions: Map<string, { abortController: AbortController; connection: Connection }> = new Map();
+  private lastKnownBalance: number | null = null;
 
   private constructor(keypair: Keypair, derivationPath: string = "m/44'/501'/0'/0'") {
     this.keypair = keypair;
@@ -363,6 +389,279 @@ export class SolanaWallet {
   }
 
   /**
+   * Add an event listener
+   * @param event - Event type to listen for
+   * @param listener - Callback function to execute when event is emitted
+   * @returns Function to remove the listener
+   */
+  on(
+    event: WalletEventType,
+    listener: (data: BalanceChangeEvent | TokenBalanceChangeEvent) => void
+  ): () => void {
+    this.ensureNotCleared();
+    if (!this.eventListeners.has(event)) {
+      this.eventListeners.set(event, new Set());
+    }
+    this.eventListeners.get(event)!.add(listener);
+
+    // Return unsubscribe function
+    return () => {
+      this.off(event, listener);
+    };
+  }
+
+  /**
+   * Remove an event listener
+   * @param event - Event type
+   * @param listener - Callback function to remove
+   */
+  off(event: WalletEventType, listener: (data: BalanceChangeEvent | TokenBalanceChangeEvent) => void): void {
+    const listeners = this.eventListeners.get(event);
+    if (listeners) {
+      listeners.delete(listener);
+    }
+  }
+
+  /**
+   * Remove all listeners for an event type, or all listeners if no event specified
+   * @param event - Optional event type to clear
+   */
+  removeAllListeners(event?: WalletEventType): void {
+    if (event) {
+      this.eventListeners.delete(event);
+    } else {
+      this.eventListeners.clear();
+    }
+  }
+
+  /**
+   * Emit an event to all registered listeners
+   * @param event - Event type
+   * @param data - Event data
+   */
+  private emit(event: WalletEventType, data: BalanceChangeEvent | TokenBalanceChangeEvent): void {
+    const listeners = this.eventListeners.get(event);
+    if (listeners) {
+      listeners.forEach((listener) => {
+        try {
+          listener(data);
+        } catch (error) {
+          // Silently catch errors in listeners to prevent one bad listener from breaking others
+          console.error(`Error in event listener for ${event}:`, error);
+        }
+      });
+    }
+  }
+
+  /**
+   * Start monitoring balance changes using Solana Kit WebSocket subscriptions
+   * @param connection - Solana RPC connection (used to get WebSocket URL)
+   * @param wsUrl - Optional WebSocket URL (if not provided, derived from connection endpoint)
+   */
+  async startBalanceMonitoring(connection: Connection, wsUrl?: string): Promise<void> {
+    this.ensureNotCleared();
+    this.stopBalanceMonitoring();
+
+    this.balanceMonitorConnection = connection;
+
+    // Get initial balance
+    const initialBalance = await this.getBalance(connection);
+    this.lastKnownBalance = initialBalance;
+
+    // Derive WebSocket URL from connection if not provided
+    const websocketUrl = wsUrl || this.getWebSocketUrl(connection.rpcEndpoint);
+
+    // Create Solana Kit RPC subscriptions client
+    const rpcSubscriptions = createSolanaRpcSubscriptions(websocketUrl);
+    const accountAddress = address(this.keypair.publicKey.toString());
+
+    // Create abort controller for cleanup
+    const abortController = new AbortController();
+    this.balanceMonitorAbortController = abortController;
+
+    // Subscribe to account notifications using async generator
+    const accountNotifications = await rpcSubscriptions
+      .accountNotifications(accountAddress, {
+        commitment: 'confirmed',
+      })
+      .subscribe({ abortSignal: abortController.signal });
+
+    // Process notifications in background
+    (async () => {
+      try {
+        for await (const notification of accountNotifications) {
+          if (this._isCleared || abortController.signal.aborted) {
+            break;
+          }
+
+          const newBalance = Number(notification.value.lamports) / LAMPORTS_PER_SOL;
+          if (this.lastKnownBalance !== null && newBalance !== this.lastKnownBalance) {
+            this.emit('balanceChange', {
+              previousBalance: this.lastKnownBalance,
+              newBalance,
+              difference: newBalance - this.lastKnownBalance,
+            });
+          }
+          this.lastKnownBalance = newBalance;
+        }
+      } catch (error) {
+        // Only log if not aborted (abort is expected when stopping)
+        if (!abortController.signal.aborted && !this._isCleared) {
+          console.error('Error in balance monitoring:', error);
+        }
+      }
+    })();
+  }
+
+  /**
+   * Convert HTTP RPC endpoint to WebSocket URL
+   * @param rpcEndpoint - HTTP RPC endpoint URL
+   * @returns WebSocket URL
+   */
+  private getWebSocketUrl(rpcEndpoint: string): string {
+    // Convert http:// or https:// to ws:// or wss://
+    if (rpcEndpoint.startsWith('https://')) {
+      return rpcEndpoint.replace('https://', 'wss://');
+    }
+    if (rpcEndpoint.startsWith('http://')) {
+      return rpcEndpoint.replace('http://', 'ws://');
+    }
+    // If already a WebSocket URL, return as is
+    if (rpcEndpoint.startsWith('ws://') || rpcEndpoint.startsWith('wss://')) {
+      return rpcEndpoint;
+    }
+    // Default fallback
+    return `wss://${rpcEndpoint}`;
+  }
+
+  /**
+   * Start monitoring token balance changes for a specific token using Solana Kit
+   * @param connection - Solana RPC connection
+   * @param tokenMint - Token mint address (PublicKey or string)
+   * @param wsUrl - Optional WebSocket URL (if not provided, derived from connection endpoint)
+   */
+  async startTokenBalanceMonitoring(
+    connection: Connection,
+    tokenMint: PublicKey | string,
+    wsUrl?: string
+  ): Promise<void> {
+    this.ensureNotCleared();
+
+    const mintPublicKey = typeof tokenMint === 'string' ? new PublicKey(tokenMint) : tokenMint;
+    const mintString = mintPublicKey.toString();
+
+    // Stop existing subscription if any
+    this.stopTokenBalanceMonitoring(tokenMint);
+
+    // Get associated token address
+    const associatedTokenAddress = await getAssociatedTokenAddress(
+      mintPublicKey,
+      this.keypair.publicKey
+    );
+
+    // Get initial balance
+    const previousBalance = await this.getTokenBalance(connection, mintPublicKey);
+
+    // Derive WebSocket URL from connection if not provided
+    const websocketUrl = wsUrl || this.getWebSocketUrl(connection.rpcEndpoint);
+
+    // Create Solana Kit RPC subscriptions client
+    const rpcSubscriptions = createSolanaRpcSubscriptions(websocketUrl);
+    const tokenAccountAddress = address(associatedTokenAddress.toString());
+
+    // Create abort controller for cleanup
+    const abortController = new AbortController();
+
+    // Subscribe to token account notifications
+    const accountNotifications = await rpcSubscriptions
+      .accountNotifications(tokenAccountAddress, {
+        commitment: 'confirmed',
+      })
+      .subscribe({ abortSignal: abortController.signal });
+
+    // Store subscription info
+    this.tokenBalanceSubscriptions.set(mintString, { abortController, connection });
+
+    // Process notifications in background
+    (async () => {
+      try {
+        for await (const _notification of accountNotifications) {
+          if (this._isCleared || abortController.signal.aborted) {
+            break;
+          }
+
+          try {
+            const newBalance = await this.getTokenBalance(connection, mintPublicKey);
+            const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
+            const newAmount = newBalance ? parseFloat(newBalance.amount) : 0;
+            const difference = newAmount - previousAmount;
+
+            if (difference !== 0) {
+              this.emit('tokenBalanceChange', {
+                mint: mintString,
+                previousBalance,
+                newBalance,
+                difference,
+              });
+            }
+          } catch {
+            // Silently handle errors
+          }
+        }
+      } catch (error) {
+        // Only log if not aborted
+        if (!abortController.signal.aborted && !this._isCleared) {
+          console.error(`Error in token balance monitoring for ${mintString}:`, error);
+        }
+      }
+    })();
+  }
+
+  /**
+   * Stop monitoring balance changes
+   */
+  stopBalanceMonitoring(): void {
+    if (this.balanceMonitorAbortController) {
+      this.balanceMonitorAbortController.abort();
+      this.balanceMonitorAbortController = null;
+    }
+    this.balanceMonitorConnection = null;
+    this.lastKnownBalance = null;
+  }
+
+  /**
+   * Stop monitoring token balance changes for a specific token
+   * @param tokenMint - Token mint address (PublicKey or string)
+   */
+  stopTokenBalanceMonitoring(tokenMint: PublicKey | string): void {
+    const mintPublicKey = typeof tokenMint === 'string' ? new PublicKey(tokenMint) : tokenMint;
+    const mintString = mintPublicKey.toString();
+    const subscription = this.tokenBalanceSubscriptions.get(mintString);
+
+    if (subscription) {
+      subscription.abortController.abort();
+      this.tokenBalanceSubscriptions.delete(mintString);
+    }
+  }
+
+  /**
+   * Stop all token balance monitoring
+   */
+  stopAllTokenBalanceMonitoring(): void {
+    this.tokenBalanceSubscriptions.forEach((subscription) => {
+      subscription.abortController.abort();
+    });
+    this.tokenBalanceSubscriptions.clear();
+  }
+
+  /**
+   * Check if balance monitoring is active
+   */
+  isBalanceMonitoringActive(): boolean {
+    return this.balanceMonitorAbortController !== null;
+  }
+
+  /**
    * Get SOL balance for this wallet
    * @param connection - Solana RPC connection
    * @returns Balance in SOL (not lamports)
@@ -469,6 +768,8 @@ export class SolanaWallet {
       })
     );
 
+    const previousBalance = await this.getBalance(connection);
+
     const signature = await sendAndConfirmTransaction(
       connection,
       transaction,
@@ -478,6 +779,20 @@ export class SolanaWallet {
         maxRetries: options?.maxRetries,
       }
     );
+
+    // Emit balance change event
+    try {
+      const newBalance = await this.getBalance(connection);
+      if (previousBalance !== newBalance) {
+        this.emit('balanceChange', {
+          previousBalance,
+          newBalance,
+          difference: newBalance - previousBalance,
+        });
+      }
+    } catch {
+      // Silently handle errors when fetching balance after send
+    }
 
     return signature;
   }
@@ -541,6 +856,8 @@ export class SolanaWallet {
       )
     );
 
+    const previousTokenBalance = await this.getTokenBalance(connection, mintPublicKey);
+
     const signature = await sendAndConfirmTransaction(
       connection,
       transaction,
@@ -550,6 +867,25 @@ export class SolanaWallet {
         maxRetries: options?.maxRetries,
       }
     );
+
+    // Emit token balance change event
+    try {
+      const newTokenBalance = await this.getTokenBalance(connection, mintPublicKey);
+      const previousAmount = previousTokenBalance ? parseFloat(previousTokenBalance.amount) : 0;
+      const newAmount = newTokenBalance ? parseFloat(newTokenBalance.amount) : 0;
+      const difference = newAmount - previousAmount;
+
+      if (difference !== 0) {
+        this.emit('tokenBalanceChange', {
+          mint: mintPublicKey.toString(),
+          previousBalance: previousTokenBalance,
+          newBalance: newTokenBalance,
+          difference,
+        });
+      }
+    } catch {
+      // Silently handle errors when fetching token balance after send
+    }
 
     return signature;
   }
@@ -692,6 +1028,15 @@ export class SolanaWallet {
     if (this._isCleared) {
       return;
     }
+
+    // Stop balance monitoring
+    this.stopBalanceMonitoring();
+
+    // Stop all token balance monitoring
+    this.stopAllTokenBalanceMonitoring();
+
+    // Remove all event listeners
+    this.removeAllListeners();
 
     secureWipe(this.keypair.secretKey);
 
