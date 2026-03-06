@@ -95,6 +95,7 @@ export class SolanaWallet {
   private balanceMonitorConnection: Connection | null = null;
   private tokenBalanceSubscriptions: Map<string, { abortController: AbortController; connection: Connection }> = new Map();
   private lastKnownBalance: number | null = null;
+  private lastKnownTokenBalances: Map<string, TokenBalance | null> = new Map();
 
   private constructor(keypair: Keypair, derivationPath: string = "m/44'/501'/0'/0'") {
     this.keypair = keypair;
@@ -560,7 +561,8 @@ export class SolanaWallet {
     );
 
     // Get initial balance
-    const previousBalance = await this.getTokenBalance(connection, mintPublicKey);
+    const initialBalance = await this.getTokenBalance(connection, mintPublicKey);
+    this.lastKnownTokenBalances.set(mintString, initialBalance);
 
     // Derive WebSocket URL from connection if not provided
     const websocketUrl = wsUrl || this.getWebSocketUrl(connection.rpcEndpoint);
@@ -592,6 +594,7 @@ export class SolanaWallet {
 
           try {
             const newBalance = await this.getTokenBalance(connection, mintPublicKey);
+            const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
             const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
             const newAmount = newBalance ? parseFloat(newBalance.amount) : 0;
             const difference = newAmount - previousAmount;
@@ -604,6 +607,8 @@ export class SolanaWallet {
                 difference,
               });
             }
+            // Always update last known balance to keep it in sync
+            this.lastKnownTokenBalances.set(mintString, newBalance);
           } catch {
             // Silently handle errors
           }
@@ -641,6 +646,7 @@ export class SolanaWallet {
     if (subscription) {
       subscription.abortController.abort();
       this.tokenBalanceSubscriptions.delete(mintString);
+      this.lastKnownTokenBalances.delete(mintString);
     }
   }
 
@@ -652,6 +658,7 @@ export class SolanaWallet {
       subscription.abortController.abort();
     });
     this.tokenBalanceSubscriptions.clear();
+    this.lastKnownTokenBalances.clear();
   }
 
   /**
