@@ -1,6 +1,6 @@
 {
   "name": "@usdnet/solana-wallet",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "A self-custodial Solana wallet package with support for creating wallets, importing from seed phrases or private keys, and signing transactions and messages",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
