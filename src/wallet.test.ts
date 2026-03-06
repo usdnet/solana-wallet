@@ -1467,9 +1467,28 @@ describe('SolanaWallet', () => {
           subscribe: mockSubscribe,
         });
 
+        // Mock logs notifications for account creation detection
+        const logsAsyncGenerator = {
+          [Symbol.asyncIterator]: async function* () {
+            // Simulate log notification for account creation
+            yield {
+              value: {
+                signature: 'test-signature',
+                err: null,
+                logs: ['Program log: InitializeAccount', `Program ${associatedTokenAddress.toString()} invoke [1]`],
+              },
+              context: { slot: BigInt(12345) },
+            };
+          },
+        };
+        const mockLogsSubscribe = vi.fn().mockResolvedValue(logsAsyncGenerator);
+        const mockLogsNotifications = vi.fn().mockReturnValue({
+          subscribe: mockLogsSubscribe,
+        });
+
         const mockRpc = {
           accountNotifications: mockAccountNotifications,
-          logsNotifications: vi.fn(),
+          logsNotifications: mockLogsNotifications,
           programNotifications: vi.fn(),
           rootNotifications: vi.fn(),
           signatureNotifications: vi.fn(),
@@ -1479,18 +1498,33 @@ describe('SolanaWallet', () => {
           mockRpc satisfies ReturnType<typeof createSolanaRpcSubscriptions>
         );
 
+        // Create separate abort controllers for logs and account notifications
+        const mockLogsAbortController = { signal: { aborted: false }, abort: vi.fn() };
+        let abortControllerIndex = 0;
         vi.spyOn(global, 'AbortController').mockImplementation(() => {
+          const controller = abortControllerIndex++ === 0 ? mockLogsAbortController : mockAbortController;
           const mockAbortControllerTyped: Partial<AbortController> = {
-            signal: mockAbortController.signal as AbortSignal,
-            abort: mockAbortController.abort,
+            signal: controller.signal as AbortSignal,
+            abort: controller.abort,
           };
           return mockAbortControllerTyped as AbortController;
         });
 
+        // Mock getTokenBalance to return balance after account creation
+        vi.spyOn(wallet, 'getTokenBalance')
+          .mockResolvedValueOnce(null) // Initial check - account doesn't exist
+          .mockResolvedValueOnce({ // After account creation
+            mint: tokenMint.toString(),
+            amount: '500000000',
+            decimals: 6,
+            uiAmount: 500,
+          });
+
         await wallet.startTokenBalanceMonitoring(connection, tokenMint);
 
-        // Wait for async processing
-        await new Promise((resolve) => setTimeout(resolve, 150));
+        // Wait for async processing (logs monitoring + account creation detection + account notifications)
+        // Need to wait for: logs subscription -> log processing -> account creation detection -> getTokenBalance -> event emission
+        await new Promise((resolve) => setTimeout(resolve, 600));
 
         // Verify event was emitted when account was created
         expect(tokenBalanceChangeListener).toHaveBeenCalledTimes(1);
@@ -1499,9 +1533,9 @@ describe('SolanaWallet', () => {
           previousBalance: null, // Account didn't exist before
           newBalance: {
             mint: tokenMint.toString(),
-            amount: '500000000', // Parsed from notification
+            amount: '500000000',
             decimals: 6,
-            uiAmount: 500, // 500000000 / 10^6
+            uiAmount: 500,
           },
           difference: 500000000, // 0 to 500000000 (account created)
         });
@@ -1554,7 +1588,6 @@ describe('SolanaWallet', () => {
         };
 
         const { createSolanaRpcSubscriptions } = await import('@solana/kit');
-        const mockAbortController = { signal: { aborted: false }, abort: vi.fn() };
 
         // Account created with zero balance
         const notifications = [
@@ -1581,9 +1614,27 @@ describe('SolanaWallet', () => {
           subscribe: mockSubscribe,
         });
 
+        // Mock logs notifications for account creation detection
+        const logsAsyncGenerator2 = {
+          [Symbol.asyncIterator]: async function* () {
+            yield {
+              value: {
+                signature: 'test-signature',
+                err: null,
+                logs: ['Program log: InitializeAccount', `Program ${associatedTokenAddress.toString()} invoke [1]`],
+              },
+              context: { slot: BigInt(12345) },
+            };
+          },
+        };
+        const mockLogsSubscribe2 = vi.fn().mockResolvedValue(logsAsyncGenerator2);
+        const mockLogsNotifications2 = vi.fn().mockReturnValue({
+          subscribe: mockLogsSubscribe2,
+        });
+
         const mockRpc = {
           accountNotifications: mockAccountNotifications,
-          logsNotifications: vi.fn(),
+          logsNotifications: mockLogsNotifications2,
           programNotifications: vi.fn(),
           rootNotifications: vi.fn(),
           signatureNotifications: vi.fn(),
@@ -1593,17 +1644,31 @@ describe('SolanaWallet', () => {
           mockRpc satisfies ReturnType<typeof createSolanaRpcSubscriptions>
         );
 
+        const mockLogsAbortController = { signal: { aborted: false }, abort: vi.fn() };
+        const mockAccountAbortController = { signal: { aborted: false }, abort: vi.fn() };
+        let abortControllerIndex = 0;
         vi.spyOn(global, 'AbortController').mockImplementation(() => {
+          const controller = abortControllerIndex++ === 0 ? mockLogsAbortController : mockAccountAbortController;
           const mockAbortControllerTyped: Partial<AbortController> = {
-            signal: mockAbortController.signal as AbortSignal,
-            abort: mockAbortController.abort,
+            signal: controller.signal as AbortSignal,
+            abort: controller.abort,
           };
           return mockAbortControllerTyped as AbortController;
         });
 
+        // Mock getTokenBalance to return balance after account creation
+        vi.spyOn(wallet, 'getTokenBalance')
+          .mockResolvedValueOnce(null) // Initial check - account doesn't exist
+          .mockResolvedValueOnce({ // After account creation
+            mint: tokenMint.toString(),
+            amount: '0',
+            decimals: 6,
+            uiAmount: 0,
+          });
+
         await wallet.startTokenBalanceMonitoring(connection, tokenMint);
 
-        await new Promise((resolve) => setTimeout(resolve, 150));
+        await new Promise((resolve) => setTimeout(resolve, 600));
 
         // Verify event was emitted even though balance is 0 (account was created)
         expect(tokenBalanceChangeListener).toHaveBeenCalledTimes(1);
@@ -1654,36 +1719,28 @@ describe('SolanaWallet', () => {
         });
 
         const { createSolanaRpcSubscriptions } = await import('@solana/kit');
-        const mockAbortController = { signal: { aborted: false }, abort: vi.fn() };
 
-        // Notification with null data (account still doesn't exist)
-        const notifications = [
-          {
-            value: {
-              data: null,
-              owner: null,
-              lamports: BigInt(0),
-              executable: false,
-            },
-          },
-        ];
-
-        const mockAsyncGenerator = {
+        // Mock logs notifications - no account creation logs (account remains non-existent)
+        const mockLogsSubscribe = vi.fn().mockResolvedValue({
           [Symbol.asyncIterator]: async function* () {
-            for (const notification of notifications) {
-              yield notification;
-            }
+            // No logs that indicate account creation - just yield nothing or unrelated logs
+            yield {
+              value: {
+                signature: 'unrelated-signature',
+                err: null,
+                logs: ['Program log: SomeOtherInstruction'],
+              },
+              context: { slot: BigInt(12345) },
+            };
           },
-        };
-
-        const mockSubscribe = vi.fn().mockResolvedValue(mockAsyncGenerator);
-        const mockAccountNotifications = vi.fn().mockReturnValue({
-          subscribe: mockSubscribe,
+        });
+        const mockLogsNotifications = vi.fn().mockReturnValue({
+          subscribe: mockLogsSubscribe,
         });
 
         const mockRpc = {
-          accountNotifications: mockAccountNotifications,
-          logsNotifications: vi.fn(),
+          accountNotifications: vi.fn(), // Won't be used since account doesn't exist
+          logsNotifications: mockLogsNotifications,
           programNotifications: vi.fn(),
           rootNotifications: vi.fn(),
           signatureNotifications: vi.fn(),
@@ -1693,10 +1750,11 @@ describe('SolanaWallet', () => {
           mockRpc satisfies ReturnType<typeof createSolanaRpcSubscriptions>
         );
 
+        const mockLogsAbortController = { signal: { aborted: false }, abort: vi.fn() };
         vi.spyOn(global, 'AbortController').mockImplementation(() => {
           const mockAbortControllerTyped: Partial<AbortController> = {
-            signal: mockAbortController.signal as AbortSignal,
-            abort: mockAbortController.abort,
+            signal: mockLogsAbortController.signal as AbortSignal,
+            abort: mockLogsAbortController.abort,
           };
           return mockAbortControllerTyped as AbortController;
         });
@@ -1781,7 +1839,11 @@ describe('SolanaWallet', () => {
               [Symbol.asyncIterator]: async function* () { },
             }),
           }),
-          logsNotifications: vi.fn(),
+          logsNotifications: vi.fn().mockReturnValue({
+            subscribe: vi.fn().mockResolvedValue({
+              [Symbol.asyncIterator]: async function* () { },
+            }),
+          }),
           programNotifications: vi.fn(),
           rootNotifications: vi.fn(),
           signatureNotifications: vi.fn(),

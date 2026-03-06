@@ -94,7 +94,12 @@ export class SolanaWallet {
   > = new Map();
   private balanceMonitorAbortController: AbortController | null = null;
   private balanceMonitorConnection: Connection | null = null;
-  private tokenBalanceSubscriptions: Map<string, { abortController: AbortController; connection: Connection; decimals: number }> = new Map();
+  private tokenBalanceSubscriptions: Map<string, {
+    abortController: AbortController;
+    connection: Connection;
+    decimals: number;
+    logsAbortController?: AbortController; // For monitoring Token Program logs when account doesn't exist
+  }> = new Map();
   private lastKnownBalance: number | null = null;
   private lastKnownTokenBalances: Map<string, TokenBalance | null> = new Map();
 
@@ -538,6 +543,7 @@ export class SolanaWallet {
 
   /**
    * Start monitoring token balance changes for a specific token using Solana Kit
+   * If the account doesn't exist, monitors Token Program logs for account creation
    * @param connection - Solana RPC connection
    * @param tokenMint - Token mint address (PublicKey or string)
    * @param wsUrl - Optional WebSocket URL (if not provided, derived from connection endpoint)
@@ -581,134 +587,288 @@ export class SolanaWallet {
 
     // Create Solana Kit RPC subscriptions client
     const rpcSubscriptions = createSolanaRpcSubscriptions(websocketUrl);
-    const tokenAccountAddress = address(associatedTokenAddress.toString());
 
     // Create abort controller for cleanup
     const abortController = new AbortController();
 
-    // Subscribe to token account notifications
-    const accountNotifications = await rpcSubscriptions
-      .accountNotifications(tokenAccountAddress, {
-        commitment: 'confirmed',
-      })
-      .subscribe({ abortSignal: abortController.signal });
-
     // Store subscription info
     this.tokenBalanceSubscriptions.set(mintString, { abortController, connection, decimals });
 
-    // Process notifications in background
+    // If account exists, start account notifications directly
+    if (initialBalance !== null) {
+      this.startAccountNotifications(
+        rpcSubscriptions,
+        associatedTokenAddress,
+        mintPublicKey,
+        mintString,
+        abortController,
+        connection,
+        decimals
+      );
+    } else {
+      // Account doesn't exist - monitor Token Program logs for account creation
+      this.startTokenProgramLogsMonitoring(
+        rpcSubscriptions,
+        associatedTokenAddress,
+        mintPublicKey,
+        mintString,
+        abortController,
+        connection,
+        decimals
+      );
+    }
+  }
+
+  /**
+   * Start monitoring account notifications for an existing token account
+   * @private
+   */
+  private startAccountNotifications(
+    rpcSubscriptions: ReturnType<typeof createSolanaRpcSubscriptions>,
+    associatedTokenAddress: PublicKey,
+    mintPublicKey: PublicKey,
+    mintString: string,
+    abortController: AbortController,
+    connection: Connection,
+    decimals: number
+  ): void {
+    const tokenAccountAddress = address(associatedTokenAddress.toString());
+
+    // Subscribe to token account notifications
     (async () => {
       try {
+        const accountNotifications = await rpcSubscriptions
+          .accountNotifications(tokenAccountAddress, {
+            commitment: 'confirmed',
+          })
+          .subscribe({ abortSignal: abortController.signal });
+
         for await (const notification of accountNotifications) {
           if (this._isCleared || abortController.signal.aborted) {
             break;
           }
 
-          try {
-            // Parse account data directly from notification
-            const accountData = notification.value.data;
-            const accountOwner = notification.value.owner;
+          this.processTokenAccountNotification(
+            notification,
+            associatedTokenAddress,
+            mintPublicKey,
+            mintString,
+            connection,
+            decimals
+          );
+        }
+      } catch (error) {
+        // Only log if not aborted
+        if (!abortController.signal.aborted && !this._isCleared) {
+          console.error(`Error in account notifications for ${mintString}:`, error);
+        }
+      }
+    })();
+  }
 
-            if (!accountData || !accountOwner) {
-              // Account doesn't exist or has been closed
+  /**
+   * Start monitoring Token Program logs to detect account creation
+   * @private
+   */
+  private startTokenProgramLogsMonitoring(
+    rpcSubscriptions: ReturnType<typeof createSolanaRpcSubscriptions>,
+    associatedTokenAddress: PublicKey,
+    mintPublicKey: PublicKey,
+    mintString: string,
+    abortController: AbortController,
+    connection: Connection,
+    decimals: number
+  ): void {
+    // Create separate abort controller for logs subscription
+    const logsAbortController = new AbortController();
+    const subscription = this.tokenBalanceSubscriptions.get(mintString);
+    if (subscription) {
+      subscription.logsAbortController = logsAbortController;
+    }
+
+    // Subscribe to Token Program logs
+    (async () => {
+      try {
+        const accountAddress = address(associatedTokenAddress.toString());
+        const logsNotifications = await rpcSubscriptions
+          .logsNotifications({ mentions: [accountAddress] }, {
+            commitment: 'confirmed',
+          })
+          .subscribe({ abortSignal: logsAbortController.signal });
+
+        for await (const logNotification of logsNotifications) {
+          if (this._isCleared || abortController.signal.aborted || logsAbortController.signal.aborted) {
+            break;
+          }
+
+          // Check if this log is related to our token account creation
+          const logMessage = logNotification.value.logs.join(' ');
+
+          // Look for InitializeAccount or Create instructions
+          if (logMessage.includes('InitializeAccount') || logMessage.includes('Create')) {
+            // Account was created - switch to account notifications
+            logsAbortController.abort();
+
+            // Small delay to ensure account is fully initialized
+            await new Promise((resolve) => setTimeout(resolve, 500));
+
+            // Get the new balance
+            const newBalance = await this.getTokenBalance(connection, mintPublicKey);
+            if (newBalance !== null) {
               const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
-              if (previousBalance !== null) {
-                this.emit('tokenBalanceChange', {
-                  mint: mintString,
-                  previousBalance,
-                  newBalance: null,
-                  difference: -parseFloat(previousBalance.amount),
-                });
-                this.lastKnownTokenBalances.set(mintString, null);
-              } else {
-                this.lastKnownTokenBalances.set(mintString, null);
-              }
-              continue;
-            }
+              const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
+              const newAmount = parseFloat(newBalance.amount);
+              const difference = newAmount - previousAmount;
 
-            // Convert account data to Buffer for unpackAccount
-            let dataBuffer: Buffer;
-            if (typeof accountData === 'string') {
-              // Base64 encoded string
-              dataBuffer = Buffer.from(accountData, 'base64');
-            } else {
-              // Uint8Array or Buffer
-              dataBuffer = Buffer.from(accountData);
-            }
-
-            // Parse token account using unpackAccount
-            const ownerPublicKey = typeof accountOwner === 'string' ? new PublicKey(accountOwner) : accountOwner;
-            const accountInfo: AccountInfo<Buffer> = {
-              data: dataBuffer,
-              executable: notification.value.executable ?? false,
-              lamports: Number(notification.value.lamports),
-              owner: ownerPublicKey,
-            };
-
-            const tokenAccount = unpackAccount(associatedTokenAddress, accountInfo, TOKEN_PROGRAM_ID);
-
-            // Get cached decimals
-            const subscription = this.tokenBalanceSubscriptions.get(mintString);
-            const tokenDecimals = subscription?.decimals ?? decimals;
-
-            // Calculate UI amount
-            const amountNumber = Number(tokenAccount.amount);
-            const uiAmount = amountNumber / Math.pow(10, tokenDecimals);
-
-            // Create new balance object
-            const newBalance: TokenBalance = {
-              mint: mintString,
-              amount: tokenAccount.amount.toString(),
-              decimals: tokenDecimals,
-              uiAmount,
-            };
-
-            // Compare with previous balance
-            const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
-            const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
-            const newAmount = parseFloat(newBalance.amount);
-            const difference = newAmount - previousAmount;
-
-            if (difference !== 0 || previousBalance === null) {
+              // Emit account creation event
               this.emit('tokenBalanceChange', {
                 mint: mintString,
                 previousBalance,
                 newBalance,
                 difference,
               });
-            }
-            // Always update last known balance to keep it in sync
-            this.lastKnownTokenBalances.set(mintString, newBalance);
-          } catch {
-            // If parsing fails, fall back to RPC call
-            try {
-              const newBalance = await this.getTokenBalance(connection, mintPublicKey);
-              const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
-              const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
-              const newAmount = newBalance ? parseFloat(newBalance.amount) : 0;
-              const difference = newAmount - previousAmount;
 
-              if (difference !== 0 || (previousBalance === null && newBalance !== null) || (previousBalance !== null && newBalance === null)) {
-                this.emit('tokenBalanceChange', {
-                  mint: mintString,
-                  previousBalance,
-                  newBalance,
-                  difference,
-                });
-              }
               this.lastKnownTokenBalances.set(mintString, newBalance);
-            } catch {
-              // Silently handle errors
+
+              // Start account notifications
+              this.startAccountNotifications(
+                rpcSubscriptions,
+                associatedTokenAddress,
+                mintPublicKey,
+                mintString,
+                abortController,
+                connection,
+                decimals
+              );
             }
           }
         }
       } catch (error) {
         // Only log if not aborted
-        if (!abortController.signal.aborted && !this._isCleared) {
-          console.error(`Error in token balance monitoring for ${mintString}:`, error);
+        if (!logsAbortController.signal.aborted && !abortController.signal.aborted && !this._isCleared) {
+          console.error(`Error in token program logs monitoring for ${mintString}:`, error);
         }
       }
     })();
+  }
+
+  /**
+   * Process a token account notification
+   * @private
+   */
+  private processTokenAccountNotification(
+    notification: { value: { data: string | Uint8Array | Buffer | null; owner: string | PublicKey | null; executable?: boolean; lamports: bigint | number } },
+    associatedTokenAddress: PublicKey,
+    mintPublicKey: PublicKey,
+    mintString: string,
+    connection: Connection,
+    decimals: number
+  ): void {
+    try {
+      // Parse account data directly from notification
+      const accountData = notification.value.data;
+      const accountOwner = notification.value.owner;
+
+      if (!accountData || !accountOwner) {
+        // Account doesn't exist or has been closed
+        const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
+        if (previousBalance !== null) {
+          this.emit('tokenBalanceChange', {
+            mint: mintString,
+            previousBalance,
+            newBalance: null,
+            difference: -parseFloat(previousBalance.amount),
+          });
+          this.lastKnownTokenBalances.set(mintString, null);
+        } else {
+          this.lastKnownTokenBalances.set(mintString, null);
+        }
+        return;
+      }
+
+      // Convert account data to Buffer for unpackAccount
+      let dataBuffer: Buffer;
+      if (typeof accountData === 'string') {
+        // Base64 encoded string
+        dataBuffer = Buffer.from(accountData, 'base64');
+      } else {
+        // Uint8Array or Buffer
+        dataBuffer = Buffer.from(accountData);
+      }
+
+      // Parse token account using unpackAccount
+      const ownerPublicKey = typeof accountOwner === 'string' ? new PublicKey(accountOwner) : accountOwner;
+      const accountInfo: AccountInfo<Buffer> = {
+        data: dataBuffer,
+        executable: notification.value.executable ?? false,
+        lamports: Number(notification.value.lamports),
+        owner: ownerPublicKey,
+      };
+
+      const tokenAccount = unpackAccount(associatedTokenAddress, accountInfo, TOKEN_PROGRAM_ID);
+
+      // Calculate UI amount
+      const amountNumber = Number(tokenAccount.amount);
+      const uiAmount = amountNumber / Math.pow(10, decimals);
+
+      // Create new balance object
+      const newBalance: TokenBalance = {
+        mint: mintString,
+        amount: tokenAccount.amount.toString(),
+        decimals,
+        uiAmount,
+      };
+
+      // Compare with previous balance
+      const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
+      const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
+      const newAmount = parseFloat(newBalance.amount);
+      const difference = newAmount - previousAmount;
+
+      if (difference !== 0 || previousBalance === null) {
+        this.emit('tokenBalanceChange', {
+          mint: mintString,
+          previousBalance,
+          newBalance,
+          difference,
+        });
+      }
+      // Always update last known balance to keep it in sync
+      this.lastKnownTokenBalances.set(mintString, newBalance);
+    } catch {
+      // If parsing fails, fall back to RPC call
+      this.handleTokenBalanceFallback(connection, mintPublicKey, mintString);
+    }
+  }
+
+  /**
+   * Fallback to RPC call when parsing fails
+   * @private
+   */
+  private async handleTokenBalanceFallback(
+    connection: Connection,
+    mintPublicKey: PublicKey,
+    mintString: string
+  ): Promise<void> {
+    try {
+      const newBalance = await this.getTokenBalance(connection, mintPublicKey);
+      const previousBalance = this.lastKnownTokenBalances.get(mintString) ?? null;
+      const previousAmount = previousBalance ? parseFloat(previousBalance.amount) : 0;
+      const newAmount = newBalance ? parseFloat(newBalance.amount) : 0;
+      const difference = newAmount - previousAmount;
+
+      if (difference !== 0 || (previousBalance === null && newBalance !== null) || (previousBalance !== null && newBalance === null)) {
+        this.emit('tokenBalanceChange', {
+          mint: mintString,
+          previousBalance,
+          newBalance,
+          difference,
+        });
+      }
+      this.lastKnownTokenBalances.set(mintString, newBalance);
+    } catch {
+      // Silently handle errors
+    }
   }
 
   /**
@@ -734,6 +894,9 @@ export class SolanaWallet {
 
     if (subscription) {
       subscription.abortController.abort();
+      if (subscription.logsAbortController) {
+        subscription.logsAbortController.abort();
+      }
       this.tokenBalanceSubscriptions.delete(mintString);
       this.lastKnownTokenBalances.delete(mintString);
     }
@@ -745,6 +908,9 @@ export class SolanaWallet {
   stopAllTokenBalanceMonitoring(): void {
     this.tokenBalanceSubscriptions.forEach((subscription) => {
       subscription.abortController.abort();
+      if (subscription.logsAbortController) {
+        subscription.logsAbortController.abort();
+      }
     });
     this.tokenBalanceSubscriptions.clear();
     this.lastKnownTokenBalances.clear();
