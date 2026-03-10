@@ -697,13 +697,26 @@ describe('SolanaWallet', () => {
       });
 
       // Mock getParsedTransaction - Token transfer
+      // Pre-balance: 50 tokens, Post-balance: 100 tokens, Transfer amount: 50 tokens
       const mockParsedTx2: web3.ParsedTransactionWithMeta = {
         meta: {
           err: null,
           fee: 5000,
           preBalances: [1000000000],
           postBalances: [1000000000],
-          preTokenBalances: [],
+          preTokenBalances: [
+            {
+              accountIndex: 1,
+              mint: tokenMint.toBase58(),
+              owner: walletPubkey.toBase58(),
+              uiTokenAmount: {
+                uiAmount: 50,
+                decimals: 9,
+                amount: '50000000000',
+                uiAmountString: '50',
+              },
+            },
+          ],
           postTokenBalances: [
             {
               accountIndex: 1,
@@ -736,7 +749,87 @@ describe('SolanaWallet', () => {
       const activities = await wallet.getTransactionActivity(connection);
       expect(activities).toHaveLength(1);
       expect(activities[0].type).toBe('receive');
-      expect(activities[0].amount).toBe(100);
+      expect(activities[0].amount).toBe(50);
+      expect(activities[0].tokenMint).toBe(tokenMint.toBase58());
+
+      mockSignatures.mockRestore();
+      mockTokenAccounts.mockRestore();
+      mockTx.mockRestore();
+    });
+
+    it('should get transaction activity with token send', async () => {
+      const walletPubkey = wallet.getPublicKey();
+      const tokenMint = Keypair.generate().publicKey;
+
+      const mockSignatures = vi.spyOn(connection, 'getSignaturesForAddress').mockResolvedValue([
+        {
+          signature: 'token-send-sig',
+          slot: 12347,
+          blockTime: 1234567892,
+          err: null,
+          memo: null,
+        },
+      ]);
+
+      const mockTokenAccounts = vi.spyOn(connection, 'getParsedTokenAccountsByOwner').mockResolvedValue({
+        value: [],
+        context: { slot: 0 },
+      });
+
+      // Mock getParsedTransaction - Token send
+      // Pre-balance: 100 tokens, Post-balance: 50 tokens, Transfer amount: 50 tokens sent
+      const mockParsedTx3: web3.ParsedTransactionWithMeta = {
+        meta: {
+          err: null,
+          fee: 5000,
+          preBalances: [1000000000],
+          postBalances: [1000000000],
+          preTokenBalances: [
+            {
+              accountIndex: 1,
+              mint: tokenMint.toBase58(),
+              owner: walletPubkey.toBase58(),
+              uiTokenAmount: {
+                uiAmount: 100,
+                decimals: 9,
+                amount: '100000000000',
+                uiAmountString: '100',
+              },
+            },
+          ],
+          postTokenBalances: [
+            {
+              accountIndex: 1,
+              mint: tokenMint.toBase58(),
+              owner: walletPubkey.toBase58(),
+              uiTokenAmount: {
+                uiAmount: 50,
+                decimals: 9,
+                amount: '50000000000',
+                uiAmountString: '50',
+              },
+            },
+          ],
+          innerInstructions: [],
+          logMessages: [],
+        },
+        transaction: {
+          message: {
+            accountKeys: [{ pubkey: walletPubkey, signer: true, writable: true }],
+            instructions: [],
+            recentBlockhash: 'test-blockhash',
+          },
+          signatures: [],
+        },
+        slot: 12347,
+        blockTime: 1234567892,
+      };
+      const mockTx = vi.spyOn(connection, 'getParsedTransaction').mockResolvedValue(mockParsedTx3);
+
+      const activities = await wallet.getTransactionActivity(connection);
+      expect(activities).toHaveLength(1);
+      expect(activities[0].type).toBe('send');
+      expect(activities[0].amount).toBe(50);
       expect(activities[0].tokenMint).toBe(tokenMint.toBase58());
 
       mockSignatures.mockRestore();

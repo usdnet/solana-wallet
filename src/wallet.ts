@@ -1101,18 +1101,26 @@ export class SolanaWallet {
     let tokenMint: string | undefined;
     let memo: string | undefined;
 
-    if (tx.transaction.message.instructions) {
-      for (const ix of tx.transaction.message.instructions) {
+    const instructions = tx.transaction.message.instructions;
+    if (instructions) {
+      for (const ix of instructions) {
         if ('parsed' in ix && ix.parsed?.type === 'memo') {
           memo = ix.parsed.memo;
+          break;
         }
       }
     }
 
-    const accountKeys = tx.transaction.message.accountKeys.map((key) =>
-      typeof key === 'string' ? key : key.pubkey.toBase58()
-    );
-    const walletIndex = accountKeys.findIndex((key) => key === walletAddress);
+    const accountKeys = tx.transaction.message.accountKeys;
+    let walletIndex = -1;
+    for (let i = 0; i < accountKeys.length; i++) {
+      const key = accountKeys[i];
+      const keyStr = typeof key === 'string' ? key : key.pubkey.toBase58();
+      if (keyStr === walletAddress) {
+        walletIndex = i;
+        break;
+      }
+    }
 
     if (walletIndex >= 0) {
       const preBalance = tx.meta.preBalances[walletIndex] || 0;
@@ -1125,14 +1133,51 @@ export class SolanaWallet {
       }
     }
 
-    if (tx.meta.postTokenBalances && tx.meta.postTokenBalances.length > 0) {
-      for (const balance of tx.meta.postTokenBalances) {
-        if (balance.owner === walletAddress) {
-          tokenMint = balance.mint;
-          const uiAmount = balance.uiTokenAmount.uiAmount;
-          if (uiAmount && uiAmount !== 0) {
-            type = uiAmount > 0 ? 'receive' : 'send';
-            amount = Math.abs(uiAmount);
+    const preTokenBalances = tx.meta.preTokenBalances || [];
+    const postTokenBalances = tx.meta.postTokenBalances || [];
+
+    if (preTokenBalances.length > 0 || postTokenBalances.length > 0) {
+      const preBalanceMap = new Map<string, typeof preTokenBalances[0]>();
+      for (const preBalance of preTokenBalances) {
+        if (preBalance.owner === walletAddress) {
+          const accountKey = `${preBalance.accountIndex}-${preBalance.mint}`;
+          preBalanceMap.set(accountKey, preBalance);
+        }
+      }
+
+      const processedAccounts = new Set<string>();
+
+      for (const postBalance of postTokenBalances) {
+        if (postBalance.owner === walletAddress) {
+          const accountKey = `${postBalance.accountIndex}-${postBalance.mint}`;
+          processedAccounts.add(accountKey);
+
+          tokenMint = postBalance.mint;
+
+          const preBalance = preBalanceMap.get(accountKey);
+          const preAmount = preBalance?.uiTokenAmount.uiAmount ?? 0;
+          const postAmount = postBalance.uiTokenAmount.uiAmount ?? 0;
+          const transferAmount = postAmount - preAmount;
+
+          if (Math.abs(transferAmount) > 0.00000001) {
+            type = transferAmount > 0 ? 'receive' : 'send';
+            amount = Math.abs(transferAmount);
+          }
+        }
+      }
+
+      for (const preBalance of preTokenBalances) {
+        if (preBalance.owner === walletAddress) {
+          const accountKey = `${preBalance.accountIndex}-${preBalance.mint}`;
+          if (!processedAccounts.has(accountKey)) {
+            tokenMint = preBalance.mint;
+            const preAmount = preBalance.uiTokenAmount.uiAmount ?? 0;
+            const transferAmount = 0 - preAmount;
+
+            if (Math.abs(transferAmount) > 0.00000001) {
+              type = 'send';
+              amount = Math.abs(transferAmount);
+            }
           }
         }
       }
