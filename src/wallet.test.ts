@@ -693,6 +693,7 @@ describe('SolanaWallet', () => {
 
       const mockTokenAccounts = vi.spyOn(connection, 'getParsedTokenAccountsByOwner').mockResolvedValue({
         value: [],
+        context: { slot: 0 },
       });
 
       // Mock getParsedTransaction - Token transfer
@@ -756,6 +757,7 @@ describe('SolanaWallet', () => {
 
       const mockTokenAccounts = vi.spyOn(connection, 'getParsedTokenAccountsByOwner').mockResolvedValue({
         value: [],
+        context: { slot: 0 },
       });
 
       const mockTx = vi.spyOn(connection, 'getParsedTransaction').mockResolvedValue(null);
@@ -775,6 +777,7 @@ describe('SolanaWallet', () => {
       const mockSignatures = vi.spyOn(connection, 'getSignaturesForAddress').mockResolvedValue([]);
       const mockTokenAccounts = vi.spyOn(connection, 'getParsedTokenAccountsByOwner').mockResolvedValue({
         value: [],
+        context: { slot: 0 },
       });
 
       await wallet.getTransactionActivity(connection, { limit: 5 });
