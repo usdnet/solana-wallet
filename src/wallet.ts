@@ -981,35 +981,97 @@ export class SolanaWallet {
     this.ensureNotCleared();
 
     const limit = options?.limit || 20;
-    const signatures = await connection.getSignaturesForAddress(
+
+    const isPaginating = !!options?.before;
+    const fetchLimit = isPaginating
+      ? Math.min(limit + 5, 50)
+      : Math.min(Math.max(limit * 2, 20), 100);
+
+    const walletSignatures = await connection.getSignaturesForAddress(
       this.keypair.publicKey,
       {
-        limit,
+        limit: fetchLimit,
         before: options?.before,
         until: options?.until,
       }
     );
 
+    let tokenAccountSignatures: ConfirmedSignatureInfo[] = [];
+
+    try {
+      const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+        this.keypair.publicKey,
+        {
+          programId: TOKEN_PROGRAM_ID,
+        }
+      );
+
+      const maxTokenAccountsToQuery = 20;
+      const tokenAccountsToQuery = tokenAccounts.value.slice(0, maxTokenAccountsToQuery);
+
+      const perAccountLimit = isPaginating
+        ? Math.min(limit + 3, 30)
+        : Math.min(Math.max(limit, 10), 50);
+
+      const tokenAccountPromises = tokenAccountsToQuery.map((account) =>
+        connection.getSignaturesForAddress(account.pubkey, {
+          limit: perAccountLimit,
+          before: options?.before,
+          until: options?.until,
+        }).catch(() => [] as ConfirmedSignatureInfo[])
+      );
+
+      const tokenAccountResults = await Promise.all(tokenAccountPromises);
+      tokenAccountSignatures = tokenAccountResults.flat();
+    } catch {
+      void 0;
+    }
+
+    const signatureMap = new Map<string, ConfirmedSignatureInfo>();
+
+    for (const sigInfo of walletSignatures) {
+      signatureMap.set(sigInfo.signature, sigInfo);
+    }
+
+    for (const sigInfo of tokenAccountSignatures) {
+      if (!signatureMap.has(sigInfo.signature)) {
+        signatureMap.set(sigInfo.signature, sigInfo);
+      }
+    }
+
+    const allSignatures = Array.from(signatureMap.values()).sort((a, b) => {
+      const timeA = a.blockTime ?? 0;
+      const timeB = b.blockTime ?? 0;
+      if (timeB !== timeA) {
+        return timeB - timeA;
+      }
+      return b.slot - a.slot;
+    });
+
+    const limitedSignatures = allSignatures.slice(0, limit);
+
     const activities: TransactionActivity[] = [];
 
-    for (const sigInfo of signatures) {
+    const transactionPromises = limitedSignatures.map(async (sigInfo) => {
       try {
         const tx = await connection.getParsedTransaction(sigInfo.signature, {
           maxSupportedTransactionVersion: 0,
         });
 
-        const activity = this.parseTransactionActivity(sigInfo, tx, this.keypair.publicKey);
-        activities.push(activity);
+        return this.parseTransactionActivity(sigInfo, tx, this.keypair.publicKey);
       } catch {
-        activities.push({
+        return {
           signature: sigInfo.signature,
           slot: sigInfo.slot,
           blockTime: sigInfo.blockTime ?? null,
           err: sigInfo.err,
-          type: 'other',
-        });
+          type: 'other' as const,
+        };
       }
-    }
+    });
+
+    const results = await Promise.all(transactionPromises);
+    activities.push(...results);
 
     return activities;
   }
