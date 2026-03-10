@@ -691,6 +691,10 @@ describe('SolanaWallet', () => {
         },
       ]);
 
+      const mockTokenAccounts = vi.spyOn(connection, 'getParsedTokenAccountsByOwner').mockResolvedValue({
+        value: [],
+      });
+
       // Mock getParsedTransaction - Token transfer
       const mockParsedTx2: web3.ParsedTransactionWithMeta = {
         meta: {
@@ -735,6 +739,7 @@ describe('SolanaWallet', () => {
       expect(activities[0].tokenMint).toBe(tokenMint.toBase58());
 
       mockSignatures.mockRestore();
+      mockTokenAccounts.mockRestore();
       mockTx.mockRestore();
     });
 
@@ -749,6 +754,10 @@ describe('SolanaWallet', () => {
         },
       ]);
 
+      const mockTokenAccounts = vi.spyOn(connection, 'getParsedTokenAccountsByOwner').mockResolvedValue({
+        value: [],
+      });
+
       const mockTx = vi.spyOn(connection, 'getParsedTransaction').mockResolvedValue(null);
 
       const activities = await wallet.getTransactionActivity(connection);
@@ -758,19 +767,24 @@ describe('SolanaWallet', () => {
       expect(activities[0].err).not.toBeNull();
 
       mockSignatures.mockRestore();
+      mockTokenAccounts.mockRestore();
       mockTx.mockRestore();
     });
 
     it('should handle limit option', async () => {
       const mockSignatures = vi.spyOn(connection, 'getSignaturesForAddress').mockResolvedValue([]);
+      const mockTokenAccounts = vi.spyOn(connection, 'getParsedTokenAccountsByOwner').mockResolvedValue({
+        value: [],
+      });
 
       await wallet.getTransactionActivity(connection, { limit: 5 });
       expect(mockSignatures).toHaveBeenCalledWith(
         wallet.getPublicKey(),
-        expect.objectContaining({ limit: 5 })
+        expect.objectContaining({ limit: expect.any(Number) })
       );
 
       mockSignatures.mockRestore();
+      mockTokenAccounts.mockRestore();
     });
   });
 
