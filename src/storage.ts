@@ -2,9 +2,8 @@
  * Storage module
  */
 
-import { EncryptedWalletData } from './wallet';
-import { encryptData, decryptData, createSecureStorageKey } from './security';
 import { uint8ArrayToBase64, base64ToUint8Array } from './utils';
+import { encryptData, decryptData, createSecureStorageKey } from './security';
 
 // ============================================================================
 // Interfaces
@@ -26,7 +25,6 @@ export interface EncryptedStorageOptions {
 
 export interface StoredWallet {
   address: string;
-  encryptedData: EncryptedWalletData;
   createdAt: number;
   updatedAt: number;
 }

@@ -1,6 +1,6 @@
 # solana-wallet
 
-A secure, self-custodial Solana wallet package for web applications. Create wallets, import from seed phrases or private keys, sign transactions, and securely store encrypted keys.
+A secure, self-custodial Solana wallet package for web applications. Create wallets, import from seed phrases or private keys, and sign transactions. Seed phrases and private keys are never stored - they must be provided for each signing operation.
 
 ## Installation
 
@@ -57,30 +57,21 @@ const wallet = SolanaWallet.fromSeedPhrase('word1 word2 ... word12');
 const wallet = SolanaWallet.fromPrivateKey('base58-or-base64-or-hex-string');
 ```
 
-### Store Encrypted Wallet
+### Validate Credentials
 
 ```typescript
-import { SolanaWallet, createWalletStorage, StoredWallet } from '@usdnet/solana-wallet';
+// Validate if a seed phrase matches a wallet address
+const isValid = SolanaWallet.validateSeedPhrase(
+  walletAddress,
+  'word1 word2 ... word12',
+  "m/44'/501'/0'/0'" // Optional derivation path
+);
 
-// Initialize storage
-const storage = await createWalletStorage('user-password');
-
-// Create and store wallet
-const wallet = SolanaWallet.create();
-const encryptedData = await wallet.encryptForStorage('user-password');
-const storedWallet: StoredWallet = {
-  address: wallet.getAddress(),
-  encryptedData,
-  createdAt: Date.now(),
-  updatedAt: Date.now(),
-};
-await storage.set(wallet.getAddress(), storedWallet);
-
-// Retrieve wallet
-const stored = await storage.get<StoredWallet>(wallet.getAddress());
-if (stored) {
-  const restored = await SolanaWallet.fromEncrypted(stored.encryptedData, 'user-password');
-}
+// Validate if a private key matches a wallet address
+const isValidKey = SolanaWallet.validatePrivateKey(
+  walletAddress,
+  'base58-or-base64-or-hex-string'
+);
 ```
 
 ### Sign Transaction
@@ -92,13 +83,31 @@ const transaction = new Transaction();
 transaction.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
 transaction.feePayer = wallet.getPublicKey();
 
-const signed = wallet.signTransaction(transaction);
+// Sign with seed phrase
+const signed = wallet.signTransaction(transaction, {
+  seedPhrase: 'word1 word2 ... word12',
+  derivationPath: "m/44'/501'/0'/0'" // Optional
+});
+
+// Or sign with private key
+const signed2 = wallet.signTransaction(transaction, {
+  privateKey: 'base58-or-base64-or-hex-string'
+});
 ```
 
 ### Sign Message
 
 ```typescript
-const signature = wallet.signMessage('Hello, Solana!');
+// Sign with seed phrase
+const signature = wallet.signMessage('Hello, Solana!', {
+  seedPhrase: 'word1 word2 ... word12'
+});
+
+// Or sign with private key
+const signature2 = wallet.signMessage('Hello, Solana!', {
+  privateKey: 'base58-or-base64-or-hex-string'
+});
+
 const isValid = wallet.verifyMessage('Hello, Solana!', signature);
 ```
 
@@ -133,8 +142,19 @@ import { Connection, PublicKey } from '@solana/web3.js';
 const connection = new Connection('https://api.mainnet-beta.solana.com');
 const recipient = new PublicKey('RecipientAddressHere');
 
-// Send 0.1 SOL
-const signature = await wallet.sendSol(connection, recipient, 0.1);
+// Send 0.1 SOL with seed phrase
+const signature = await wallet.sendSol(connection, recipient, 0.1, {
+  seedPhrase: 'word1 word2 ... word12'
+});
+
+// Or send with private key
+const signature2 = await wallet.sendSol(connection, recipient, 0.1, {
+  privateKey: 'base58-or-base64-or-hex-string'
+}, {
+  skipPreflight: false, // Optional transaction options
+  maxRetries: 3
+});
+
 console.log(`Transaction: ${signature}`);
 ```
 
@@ -147,10 +167,22 @@ const connection = new Connection('https://api.mainnet-beta.solana.com');
 const tokenMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'); // USDC
 const recipient = new PublicKey('RecipientAddressHere');
 
-// Send 100 tokens (human 6 decimals). The wallet converts this to the smallest unit using `decimals`.
+// Send 100 tokens with seed phrase (amount is in human units; converted using decimals)
 const signature = await wallet.sendToken(connection, tokenMint, recipient, 100, {
+  seedPhrase: 'word1 word2 ... word12'
+}, {
   decimals: 6, // Optional: auto-detected if not provided
+  skipPreflight: false,
+  maxRetries: 3
 });
+
+// Or send with private key
+const signature2 = await wallet.sendToken(connection, tokenMint, recipient, 100, {
+  privateKey: 'base58-or-base64-or-hex-string'
+}, {
+  decimals: 6
+});
+
 console.log(`Transaction: ${signature}`);
 ```
 
@@ -215,7 +247,9 @@ wallet.stopTokenBalanceMonitoring(tokenMint);
 wallet.stopAllTokenBalanceMonitoring();
 
 // Balance change events are also emitted automatically when you send SOL or tokens
-await wallet.sendSol(connection, recipient, 0.1);
+await wallet.sendSol(connection, recipient, 0.1, {
+  seedPhrase: 'word1 word2 ... word12'
+});
 // This will automatically emit a 'balanceChange' event
 ```
 
@@ -226,12 +260,14 @@ await wallet.sendSol(connection, recipient, 0.1);
 - Cookies
 - URL parameters
 - Console logs
+- Memory (after use)
 
 **✅ Always:**
-- Use encrypted storage (`encryptForStorage()` or `createWalletStorage()`)
-- Use strong user-provided passwords
+- Provide credentials only when needed for signing/sending
 - Clear wallets when done: `wallet.clear()`
 - Use HTTPS in production
+- Validate credentials match wallet address before signing
+- Never log or expose seed phrases or private keys
 
 ## API Reference
 
@@ -243,7 +279,8 @@ await wallet.sendSol(connection, recipient, 0.1);
 - `create(options?)` - Create new wallet with random keypair
 - `fromSeedPhrase(mnemonic, options?)` - Import from seed phrase
 - `fromPrivateKey(privateKey)` - Import from private key (base58/base64/hex/Uint8Array)
-- `fromEncrypted(encryptedData, password)` - Import from encrypted data
+- `validateSeedPhrase(address, mnemonic, derivationPath?)` - Validate if seed phrase matches wallet address
+- `validatePrivateKey(address, privateKey)` - Validate if private key matches wallet address
 
 **Instance Methods:**
 - `getAddress()` - Get wallet address (string)
@@ -254,14 +291,13 @@ await wallet.sendSol(connection, recipient, 0.1);
 - `getBalance(connection)` - Get SOL balance (returns number in SOL)
 - `getTokenBalance(connection, tokenMint)` - Get SPL token balance for specific token
 - `getAllTokenBalances(connection)` - Get all SPL token balances
-- `sendSol(connection, to, amount, options?)` - Send SOL to another address
-- `sendToken(connection, tokenMint, to, amount, options?)` - Send SPL tokens to another address (amount is in human units; converted using decimals)
+- `sendSol(connection, to, amount, credentials, options?)` - Send SOL to another address (requires SigningCredentials)
+- `sendToken(connection, tokenMint, to, amount, credentials, options?)` - Send SPL tokens to another address (requires SigningCredentials, amount is in human units; converted using decimals)
 - `getTransactionActivity(connection, options?)` - Get transaction history
-- `signTransaction(transaction)` - Sign transaction
-- `signMessage(message)` - Sign message (returns Uint8Array)
-- `signMessageBase64(message)` / `signMessageBase58(message)` - Sign message in specific format
+- `signTransaction(transaction, credentials)` - Sign transaction (requires SigningCredentials)
+- `signMessage(message, credentials)` - Sign message (returns Uint8Array, requires SigningCredentials)
+- `signMessageBase64(message, credentials)` / `signMessageBase58(message, credentials)` - Sign message in specific format (requires SigningCredentials)
 - `verifyMessage(message, signature)` - Verify message signature
-- `encryptForStorage(password)` - Encrypt wallet for storage
 - `on(event, listener)` - Add event listener (returns unsubscribe function)
 - `off(event, listener)` - Remove event listener
 - `removeAllListeners(event?)` - Remove all listeners for an event type
@@ -274,26 +310,20 @@ await wallet.sendSol(connection, recipient, 0.1);
 - `clear()` - Securely clear wallet from memory
 - `isCleared()` - Check if wallet is cleared
 
-### Storage
+### SigningCredentials Interface
 
-**Factory:**
-- `createWalletStorage(password, options?)` - Create encrypted storage
-  - `options.dbName?` - Database name (default: 'solana-wallet-db')
-  - `options.storeName?` - Store name (default: 'wallets')
-  - `options.keyPrefix?` - Optional key prefix
+```typescript
+interface SigningCredentials {
+  seedPhrase?: string;        // 12 or 24 word mnemonic phrase
+  privateKey?: string | Uint8Array;  // Private key in base58/base64/hex or Uint8Array
+  derivationPath?: string;    // Optional derivation path (only used with seedPhrase, default: "m/44'/501'/0'/0'")
+}
+```
 
-**EncryptedStorage** (returned by `createWalletStorage`):
-- `set(key, value)` - Store encrypted data
-- `get<T>(key)` - Retrieve and decrypt data
-- `delete(key)` - Delete data
-- `has(key)` - Check if key exists
-- `getAllKeys()` - Get all keys
-- `clear()` - Clear all data
-- `close()` - Close storage connection
-
-**IndexedDBStorage:**
-- `init()` - Initialize IndexedDB
-- `get<T>(key)` / `set<T>(key, value)` / `delete(key)` / `has(key)` / `getAllKeys()` / `clear()` / `close()`
+**Usage:**
+- Provide either `seedPhrase` OR `privateKey` (not both)
+- `derivationPath` is only used when `seedPhrase` is provided
+- Credentials are validated to match the wallet address before signing
 
 ### Security Utilities
 

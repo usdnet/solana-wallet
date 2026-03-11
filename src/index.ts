@@ -5,8 +5,8 @@
 export {
   SolanaWallet,
   WalletOptions,
-  EncryptedWalletData,
   WalletWithMnemonic,
+  SigningCredentials,
   TokenBalance,
   TransactionActivity,
   BalanceChangeEvent,

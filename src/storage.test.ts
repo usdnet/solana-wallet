@@ -149,13 +149,11 @@ describe('Wallet Storage with EncryptedStorage', () => {
     indexedDBStorage.close();
   });
 
-  it('should store and retrieve wallet', async () => {
+  it('should store and retrieve wallet metadata', async () => {
     const wallet = SolanaWallet.create();
     const address = wallet.getAddress();
-    const encryptedData = await wallet.encryptForStorage('test-password');
     const storedWallet: StoredWallet = {
       address,
-      encryptedData,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -163,26 +161,20 @@ describe('Wallet Storage with EncryptedStorage', () => {
     await storage.set(address, storedWallet);
     const stored = await storage.get<StoredWallet>(address);
     expect(stored).not.toBeNull();
-    const restored = await SolanaWallet.fromEncrypted(stored!.encryptedData, 'test-password');
-
-    expect(restored.getAddress()).toBe(address);
+    expect(stored!.address).toBe(address);
   });
 
   it('should get all addresses', async () => {
     const wallet1 = SolanaWallet.create();
     const wallet2 = SolanaWallet.create();
 
-    const encryptedData1 = await wallet1.encryptForStorage('password');
-    const encryptedData2 = await wallet2.encryptForStorage('password');
     await storage.set(wallet1.getAddress(), {
       address: wallet1.getAddress(),
-      encryptedData: encryptedData1,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
     await storage.set(wallet2.getAddress(), {
       address: wallet2.getAddress(),
-      encryptedData: encryptedData2,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -194,10 +186,8 @@ describe('Wallet Storage with EncryptedStorage', () => {
 
   it('should get wallet metadata', async () => {
     const wallet = SolanaWallet.create();
-    const encryptedData = await wallet.encryptForStorage('password');
     await storage.set(wallet.getAddress(), {
       address: wallet.getAddress(),
-      encryptedData,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -206,48 +196,38 @@ describe('Wallet Storage with EncryptedStorage', () => {
     const wallets = await Promise.all(
       addresses.map(async (address) => {
         const stored = await storage.get<StoredWallet>(address);
-        if (stored) {
-          const { encryptedData: _encryptedData, ...metadata } = stored;
-          return metadata;
-        }
-        return null;
+        return stored;
       })
     );
     const filteredWallets = wallets.filter((w) => w !== null);
     expect(filteredWallets.length).toBe(1);
     expect(filteredWallets[0]!.address).toBe(wallet.getAddress());
-    expect(filteredWallets[0]).not.toHaveProperty('encryptedData');
   });
 
   it('should update wallet', async () => {
     const wallet = SolanaWallet.create();
     const address = wallet.getAddress();
-    const encryptedData1 = await wallet.encryptForStorage('password');
     await storage.set(address, {
       address,
-      encryptedData: encryptedData1,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
 
-    const encryptedData2 = await wallet.encryptForStorage('new-password');
     const existing = await storage.get<StoredWallet>(address);
     const updated: StoredWallet = {
       ...existing!,
-      encryptedData: encryptedData2,
       updatedAt: Date.now(),
     };
     await storage.set(address, updated);
-    const restored = await SolanaWallet.fromEncrypted(updated.encryptedData, 'new-password');
-    expect(restored.getAddress()).toBe(wallet.getAddress());
+    const stored = await storage.get<StoredWallet>(address);
+    expect(stored!.address).toBe(wallet.getAddress());
+    expect(stored!.updatedAt).toBeGreaterThan(existing!.updatedAt);
   });
 
   it('should delete wallet', async () => {
     const wallet = SolanaWallet.create();
-    const encryptedData = await wallet.encryptForStorage('password');
     await storage.set(wallet.getAddress(), {
       address: wallet.getAddress(),
-      encryptedData,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -260,10 +240,8 @@ describe('Wallet Storage with EncryptedStorage', () => {
     const wallet = SolanaWallet.create();
     expect(await storage.has(wallet.getAddress())).toBe(false);
 
-    const encryptedData = await wallet.encryptForStorage('password');
     await storage.set(wallet.getAddress(), {
       address: wallet.getAddress(),
-      encryptedData,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -281,16 +259,13 @@ describe('Factory Functions', () => {
     expect(storage).toBeInstanceOf(EncryptedStorage);
 
     const wallet = SolanaWallet.create();
-    const encryptedData = await wallet.encryptForStorage('password');
     await storage.set(wallet.getAddress(), {
       address: wallet.getAddress(),
-      encryptedData,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
     const stored = await storage.get<StoredWallet>(wallet.getAddress());
-    const restored = await SolanaWallet.fromEncrypted(stored!.encryptedData, 'password');
-    expect(restored.getAddress()).toBe(wallet.getAddress());
+    expect(stored!.address).toBe(wallet.getAddress());
 
     storage.close();
   });
@@ -305,16 +280,13 @@ describe('Factory Functions', () => {
     expect(storage).toBeInstanceOf(EncryptedStorage);
 
     const wallet = SolanaWallet.create();
-    const encryptedData = await wallet.encryptForStorage('password');
     await storage.set(wallet.getAddress(), {
       address: wallet.getAddress(),
-      encryptedData,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
     const stored = await storage.get<StoredWallet>(wallet.getAddress());
-    const restored = await SolanaWallet.fromEncrypted(stored!.encryptedData, 'password');
-    expect(restored.getAddress()).toBe(wallet.getAddress());
+    expect(stored!.address).toBe(wallet.getAddress());
 
     storage.close();
   });

@@ -205,21 +205,72 @@ describe('SolanaWallet', () => {
     });
   });
 
-  describe('fromEncrypted', () => {
-    it('should import wallet from encrypted data', async () => {
-      const wallet = SolanaWallet.create();
-      const password = 'test-password-123';
-      const encrypted = await wallet.encryptForStorage(password);
-
-      const restored = await SolanaWallet.fromEncrypted(encrypted, password);
-      expect(restored.getAddress()).toBe(wallet.getAddress());
+  describe('validateSeedPhrase', () => {
+    it('should validate correct seed phrase', () => {
+      const { wallet, mnemonic } = SolanaWallet.createWithMnemonic();
+      const address = wallet.getAddress();
+      
+      const isValid = SolanaWallet.validateSeedPhrase(address, mnemonic);
+      expect(isValid).toBe(true);
     });
 
-    it('should reject wrong password', async () => {
+    it('should reject incorrect seed phrase', () => {
       const wallet = SolanaWallet.create();
-      const encrypted = await wallet.encryptForStorage('correct-password');
+      const address = wallet.getAddress();
+      const wrongMnemonic = SolanaWallet.generateMnemonic();
+      
+      const isValid = SolanaWallet.validateSeedPhrase(address, wrongMnemonic);
+      expect(isValid).toBe(false);
+    });
 
-      await expect(SolanaWallet.fromEncrypted(encrypted, 'wrong-password')).rejects.toThrow();
+    it('should validate with custom derivation path', () => {
+      const mnemonic = SolanaWallet.generateMnemonic();
+      const wallet = SolanaWallet.fromSeedPhrase(mnemonic, {
+        derivationPath: "m/44'/501'/0'/0'"
+      });
+      const address = wallet.getAddress();
+      
+      const isValid = SolanaWallet.validateSeedPhrase(address, mnemonic, "m/44'/501'/0'/0'");
+      expect(isValid).toBe(true);
+    });
+  });
+
+  describe('validatePrivateKey', () => {
+    it('should validate correct private key', () => {
+      const wallet = SolanaWallet.create();
+      const address = wallet.getAddress();
+      const privateKey = wallet.getPrivateKeyBase58();
+      
+      const isValid = SolanaWallet.validatePrivateKey(address, privateKey);
+      expect(isValid).toBe(true);
+    });
+
+    it('should validate private key in base64 format', () => {
+      const wallet = SolanaWallet.create();
+      const address = wallet.getAddress();
+      const privateKey = wallet.getPrivateKeyBase64();
+      
+      const isValid = SolanaWallet.validatePrivateKey(address, privateKey);
+      expect(isValid).toBe(true);
+    });
+
+    it('should validate private key as Uint8Array', () => {
+      const wallet = SolanaWallet.create();
+      const address = wallet.getAddress();
+      const privateKey = wallet.getPrivateKey();
+      
+      const isValid = SolanaWallet.validatePrivateKey(address, privateKey);
+      expect(isValid).toBe(true);
+    });
+
+    it('should reject incorrect private key', () => {
+      const wallet = SolanaWallet.create();
+      const address = wallet.getAddress();
+      const wrongWallet = SolanaWallet.create();
+      const wrongPrivateKey = wrongWallet.getPrivateKeyBase58();
+      
+      const isValid = SolanaWallet.validatePrivateKey(address, wrongPrivateKey);
+      expect(isValid).toBe(false);
     });
   });
 
@@ -254,56 +305,77 @@ describe('SolanaWallet', () => {
       transaction.recentBlockhash = '11111111111111111111111111111111';
       transaction.feePayer = wallet.getPublicKey();
 
-      const signed = wallet.signTransaction(transaction);
+      const signed = wallet.signTransaction(transaction, {
+        privateKey: wallet.getPrivateKeyBase58()
+      });
       expect(signed.signatures.length).toBeGreaterThan(0);
-      // Check that signature exists (can be Uint8Array or SignaturePubkeyPair)
       const firstSig = signed.signatures[0];
       expect(firstSig).toBeDefined();
     });
 
     it('should throw error if wallet is cleared', () => {
       const wallet = SolanaWallet.create();
-      const publicKey = wallet.getPublicKey(); // Get public key before clearing
+      const publicKey = wallet.getPublicKey();
+      const privateKey = wallet.getPrivateKeyBase58();
       wallet.clear();
       const transaction = new Transaction();
       transaction.recentBlockhash = '11111111111111111111111111111111';
-      transaction.feePayer = publicKey; // Use the saved public key
+      transaction.feePayer = publicKey;
 
       expect(() => {
-        wallet.signTransaction(transaction);
+        wallet.signTransaction(transaction, { privateKey });
       }).toThrow('Wallet has been cleared');
     });
   });
 
   describe('signMessage', () => {
-    it('should sign a message string', () => {
+    it('should sign a message string with private key', () => {
       const wallet = SolanaWallet.create();
       const message = 'Hello, Solana!';
-      const signature = wallet.signMessage(message);
+      const signature = wallet.signMessage(message, {
+        privateKey: wallet.getPrivateKeyBase58()
+      });
       expect(signature).toBeInstanceOf(Uint8Array);
-      expect(signature.length).toBe(64); // Ed25519 signature length
+      expect(signature.length).toBe(64);
     });
 
-    it('should sign a message Uint8Array', () => {
-      const wallet = SolanaWallet.create();
+    it('should sign a message Uint8Array with seed phrase', () => {
+      const { wallet, mnemonic } = SolanaWallet.createWithMnemonic();
       const message = new TextEncoder().encode('Test message');
-      const signature = wallet.signMessage(message);
+      const signature = wallet.signMessage(message, {
+        seedPhrase: mnemonic
+      });
       expect(signature).toBeInstanceOf(Uint8Array);
       expect(signature.length).toBe(64);
     });
 
     it('should return base64 signature', () => {
       const wallet = SolanaWallet.create();
-      const signature = wallet.signMessageBase64('test');
+      const signature = wallet.signMessageBase64('test', {
+        privateKey: wallet.getPrivateKeyBase58()
+      });
       expect(typeof signature).toBe('string');
       expect(signature.length).toBeGreaterThan(0);
     });
 
     it('should return base58 signature', () => {
       const wallet = SolanaWallet.create();
-      const signature = wallet.signMessageBase58('test');
+      const signature = wallet.signMessageBase58('test', {
+        privateKey: wallet.getPrivateKeyBase58()
+      });
       expect(typeof signature).toBe('string');
       expect(signature.length).toBeGreaterThan(0);
+    });
+
+    it('should throw error if credentials do not match wallet', () => {
+      const wallet = SolanaWallet.create();
+      const wrongWallet = SolanaWallet.create();
+
+      expect(() => {
+        wallet.signMessage('test', {
+          privateKey: wrongWallet.getPrivateKeyBase58()
+        });
+      }).toThrow('Provided credentials do not match this wallet address');
     });
   });
 
@@ -311,7 +383,9 @@ describe('SolanaWallet', () => {
     it('should verify correct signature', () => {
       const wallet = SolanaWallet.create();
       const message = 'Test message';
-      const signature = wallet.signMessage(message);
+      const signature = wallet.signMessage(message, {
+        privateKey: wallet.getPrivateKeyBase58()
+      });
       const isValid = wallet.verifyMessage(message, signature);
       expect(isValid).toBe(true);
     });
@@ -319,7 +393,9 @@ describe('SolanaWallet', () => {
     it('should reject incorrect signature', () => {
       const wallet = SolanaWallet.create();
       const message = 'Test message';
-      wallet.signMessage(message);
+      wallet.signMessage(message, {
+        privateKey: wallet.getPrivateKeyBase58()
+      });
       const wrongSignature = new Uint8Array(64).fill(0);
       const isValid = wallet.verifyMessage(message, wrongSignature);
       expect(isValid).toBe(false);
@@ -329,28 +405,14 @@ describe('SolanaWallet', () => {
       const wallet = SolanaWallet.create();
       const message1 = 'Message 1';
       const message2 = 'Message 2';
-      const signature = wallet.signMessage(message1);
+      const signature = wallet.signMessage(message1, {
+        privateKey: wallet.getPrivateKeyBase58()
+      });
       const isValid = wallet.verifyMessage(message2, signature);
       expect(isValid).toBe(false);
     });
   });
 
-  describe('encryptForStorage', () => {
-    it('should encrypt wallet data', async () => {
-      const wallet = SolanaWallet.create();
-      const encrypted = await wallet.encryptForStorage('password');
-      expect(encrypted).toHaveProperty('encrypted');
-      expect(encrypted).toHaveProperty('iv');
-      expect(encrypted).toHaveProperty('salt');
-      expect(encrypted.encrypted).toBeTruthy();
-    });
-
-    it('should include derivation path in encrypted data', async () => {
-      const wallet = SolanaWallet.create({ derivationPath: "m/44'/501'/1'/0'" });
-      const encrypted = await wallet.encryptForStorage('password');
-      expect(encrypted.derivationPath).toBe("m/44'/501'/1'/0'");
-    });
-  });
 
   describe('clear', () => {
     it('should clear wallet and mark as cleared', () => {
@@ -365,7 +427,7 @@ describe('SolanaWallet', () => {
       wallet.clear();
 
       expect(() => wallet.getAddress()).toThrow('Wallet has been cleared');
-      expect(() => wallet.signMessage('test')).toThrow('Wallet has been cleared');
+      expect(() => wallet.signMessage('test', { privateKey: 'test' })).toThrow('Wallet has been cleared');
     });
 
     it('should be safe to call clear multiple times', () => {
@@ -507,12 +569,23 @@ describe('SolanaWallet', () => {
       vi.restoreAllMocks();
     });
 
-    it('should send SOL transaction', async () => {
-      // Mock sendAndConfirmTransaction
+    it('should send SOL transaction with private key', async () => {
       vi.mocked(web3.sendAndConfirmTransaction).mockResolvedValue('test-signature-123');
 
-      const signature = await wallet.sendSol(connection, recipient, 0.1);
+      const signature = await wallet.sendSol(connection, recipient, 0.1, {
+        privateKey: wallet.getPrivateKeyBase58()
+      });
       expect(signature).toBe('test-signature-123');
+    });
+
+    it('should send SOL transaction with seed phrase', async () => {
+      const { wallet: wallet2, mnemonic } = SolanaWallet.createWithMnemonic();
+      vi.mocked(web3.sendAndConfirmTransaction).mockResolvedValue('test-signature-456');
+
+      const signature = await wallet2.sendSol(connection, recipient, 0.1, {
+        seedPhrase: mnemonic
+      });
+      expect(signature).toBe('test-signature-456');
     });
 
     it('should handle send options', async () => {
@@ -520,6 +593,8 @@ describe('SolanaWallet', () => {
       const mockSend = vi.mocked(web3.sendAndConfirmTransaction);
 
       await wallet.sendSol(connection, recipient, 0.1, {
+        privateKey: wallet.getPrivateKeyBase58()
+      }, {
         skipPreflight: true,
         maxRetries: 3,
       });
@@ -528,6 +603,16 @@ describe('SolanaWallet', () => {
       const callArgs = mockSend.mock.calls[0];
       expect(callArgs[3]?.skipPreflight).toBe(true);
       expect(callArgs[3]?.maxRetries).toBe(3);
+    });
+
+    it('should throw error if credentials do not match wallet', async () => {
+      const wrongWallet = SolanaWallet.create();
+      
+      await expect(
+        wallet.sendSol(connection, recipient, 0.1, {
+          privateKey: wrongWallet.getPrivateKeyBase58()
+        })
+      ).rejects.toThrow('Provided credentials do not match this wallet address');
     });
   });
 
@@ -576,10 +661,44 @@ describe('SolanaWallet', () => {
       vi.mocked(web3.sendAndConfirmTransaction).mockResolvedValue('token-tx-signature');
 
       const signature = await wallet.sendToken(connection, tokenMint, recipient, 100, {
+        privateKey: wallet.getPrivateKeyBase58()
+      }, {
         decimals: 9,
       });
       expect(signature).toBe('token-tx-signature');
       expect(vi.mocked(web3.sendAndConfirmTransaction)).toHaveBeenCalled();
+    });
+
+    it('should send token with seed phrase', async () => {
+      const { wallet: wallet2, mnemonic } = SolanaWallet.createWithMnemonic();
+      const fromATA = Keypair.generate().publicKey;
+      const toATA = Keypair.generate().publicKey;
+      vi.mocked(splToken.getAssociatedTokenAddress)
+        .mockResolvedValueOnce(fromATA)
+        .mockResolvedValueOnce(toATA);
+
+      vi.spyOn(connection, 'getParsedAccountInfo').mockResolvedValue({
+        value: {
+          executable: false,
+          owner: Keypair.generate().publicKey,
+          lamports: 0,
+          data: {
+            program: 'spl-token',
+            parsed: { info: { decimals: 6 } },
+            space: 0,
+          },
+        },
+        context: { slot: 0 },
+      });
+
+      vi.mocked(web3.sendAndConfirmTransaction).mockResolvedValue('token-tx-sig');
+
+      const signature = await wallet2.sendToken(connection, tokenMint, recipient, 100, {
+        seedPhrase: mnemonic
+      }, {
+        decimals: 6,
+      });
+      expect(signature).toBe('token-tx-sig');
     });
 
     it('should auto-detect decimals if not provided', async () => {
@@ -610,7 +729,9 @@ describe('SolanaWallet', () => {
 
       vi.mocked(web3.sendAndConfirmTransaction).mockResolvedValue('tx-sig');
 
-      await wallet.sendToken(connection, tokenMint, recipient, 100);
+      await wallet.sendToken(connection, tokenMint, recipient, 100, {
+        privateKey: wallet.getPrivateKeyBase58()
+      });
       expect(vi.mocked(web3.sendAndConfirmTransaction)).toHaveBeenCalled();
     });
   });
@@ -915,7 +1036,9 @@ describe('SolanaWallet', () => {
           .spyOn(web3, 'sendAndConfirmTransaction')
           .mockResolvedValue('test-signature');
 
-        await wallet.sendSol(connection, new PublicKey('11111111111111111111111111111111'), 0.1);
+        await wallet.sendSol(connection, new PublicKey('11111111111111111111111111111111'), 0.1, {
+          privateKey: wallet.getPrivateKeyBase58()
+        });
 
         expect(balanceChangeListener).toHaveBeenCalledTimes(1);
         const callArgs = balanceChangeListener.mock.calls[0][0];
@@ -938,7 +1061,9 @@ describe('SolanaWallet', () => {
           .spyOn(web3, 'sendAndConfirmTransaction')
           .mockResolvedValue('test-signature');
 
-        await wallet.sendSol(connection, new PublicKey('11111111111111111111111111111111'), 0.1);
+        await wallet.sendSol(connection, new PublicKey('11111111111111111111111111111111'), 0.1, {
+          privateKey: wallet.getPrivateKeyBase58()
+        });
 
         // Should not emit if balance didn't change
         expect(balanceChangeListener).not.toHaveBeenCalled();
@@ -1113,7 +1238,9 @@ describe('SolanaWallet', () => {
           context: { slot: 0 },
         });
 
-        await wallet.sendToken(connection, tokenMint, recipient, 100, { decimals: 6 });
+        await wallet.sendToken(connection, tokenMint, recipient, 100, {
+          privateKey: wallet.getPrivateKeyBase58()
+        }, { decimals: 6 });
 
         expect(tokenBalanceChangeListener).toHaveBeenCalledTimes(1);
         expect(tokenBalanceChangeListener).toHaveBeenCalledWith({
@@ -1174,7 +1301,9 @@ describe('SolanaWallet', () => {
           context: { slot: 0 },
         });
 
-        await wallet.sendToken(connection, tokenMint, recipient, 100, { decimals: 6 });
+        await wallet.sendToken(connection, tokenMint, recipient, 100, {
+          privateKey: wallet.getPrivateKeyBase58()
+        }, { decimals: 6 });
 
         // Should not emit if balance didn't change
         expect(tokenBalanceChangeListener).not.toHaveBeenCalled();
@@ -1231,7 +1360,9 @@ describe('SolanaWallet', () => {
           context: { slot: 0 },
         });
 
-        await wallet.sendToken(connection, tokenMint, recipient, 100, { decimals: 6 });
+        await wallet.sendToken(connection, tokenMint, recipient, 100, {
+          privateKey: wallet.getPrivateKeyBase58()
+        }, { decimals: 6 });
 
         expect(tokenBalanceChangeListener).toHaveBeenCalledTimes(1);
         expect(tokenBalanceChangeListener).toHaveBeenCalledWith({
