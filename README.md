@@ -1,6 +1,6 @@
 # solana-wallet
 
-A secure, self-custodial Solana wallet package for web applications. Create wallets, import from seed phrases or private keys, and sign transactions. Seed phrases and private keys are never stored - they must be provided for each signing operation.
+A secure, self-custodial Solana wallet package for web applications. Create wallets, import from seed phrases or private keys, and sign transactions. The wallet only stores the public key and derivation path (metadata) - no sensitive data is stored in memory. Seed phrases and private keys must be provided for each signing operation.
 
 ## Installation
 
@@ -26,6 +26,19 @@ console.log('Mnemonic:', mnemonic); // Save this securely!
 
 // Or generate 24-word mnemonic
 const { wallet: wallet24, mnemonic: mnemonic24 } = SolanaWallet.createWithMnemonic({ strength: 256 });
+```
+
+### Create Wallet with Private Key
+
+```typescript
+// Generate keypair and create wallet together
+const { wallet, privateKey } = SolanaWallet.createWithPrivateKey();
+console.log('Address:', wallet.getAddress());
+console.log('Private Key:', privateKey); // Save this securely! (base58 encoded)
+
+// The private key is returned but NOT stored in the wallet
+// You can later recreate the wallet using:
+const recreatedWallet = SolanaWallet.fromPrivateKey(privateKey);
 ```
 
 ### Generate Mnemonic Only
@@ -186,6 +199,26 @@ const signature2 = await wallet.sendToken(connection, tokenMint, recipient, 100,
 console.log(`Transaction: ${signature}`);
 ```
 
+### Estimate Transaction Fees
+
+```typescript
+import { Connection, PublicKey } from '@solana/web3.js';
+
+const connection = new Connection('https://api.mainnet-beta.solana.com');
+const recipient = new PublicKey('RecipientAddressHere');
+
+// Estimate fee for sending SOL
+const solFee = await wallet.estimateSendSolFee(connection, recipient, 0.1);
+console.log(`Estimated fee: ${solFee} SOL`);
+
+// Estimate fee for sending tokens
+const tokenMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'); // USDC
+const tokenFee = await wallet.estimateSendTokenFee(connection, tokenMint, recipient, 100, {
+  decimals: 6 // Optional: auto-detected if not provided
+});
+console.log(`Estimated token transfer fee: ${tokenFee} SOL`);
+```
+
 ### Get Transaction Activity
 
 ```typescript
@@ -255,16 +288,9 @@ await wallet.sendSol(connection, recipient, 0.1, {
 
 ## Security
 
-**⚠️ Never store private keys or seed phrases in:**
-- `localStorage` / `sessionStorage`
-- Cookies
-- URL parameters
-- Console logs
-- Memory (after use)
 
 **✅ Always:**
 - Provide credentials only when needed for signing/sending
-- Clear wallets when done: `wallet.clear()`
 - Use HTTPS in production
 - Validate credentials match wallet address before signing
 - Never log or expose seed phrases or private keys
@@ -276,6 +302,7 @@ await wallet.sendSol(connection, recipient, 0.1, {
 **Static Methods:**
 - `generateMnemonic(strength?)` - Generate mnemonic seed phrase (128 bits = 12 words, 256 bits = 24 words)
 - `createWithMnemonic(options?)` - Generate mnemonic and create wallet together
+- `createWithPrivateKey(options?)` - Generate keypair and create wallet together, returns private key (base58 encoded) but does NOT store it
 - `create(options?)` - Create new wallet with random keypair
 - `fromSeedPhrase(mnemonic, options?)` - Import from seed phrase
 - `fromPrivateKey(privateKey)` - Import from private key (base58/base64/hex/Uint8Array)
@@ -285,14 +312,14 @@ await wallet.sendSol(connection, recipient, 0.1, {
 **Instance Methods:**
 - `getAddress()` - Get wallet address (string)
 - `getPublicKey()` - Get PublicKey object
-- `getPrivateKey()` - Get private key as Uint8Array
-- `getPrivateKeyBase58()` / `getPrivateKeyBase64()` / `getPrivateKeyHex()` - Get private key in various formats
 - `getDerivationPath()` - Get derivation path used for mnemonic-derived wallets
 - `getBalance(connection)` - Get SOL balance (returns number in SOL)
 - `getTokenBalance(connection, tokenMint)` - Get SPL token balance for specific token
 - `getAllTokenBalances(connection)` - Get all SPL token balances
 - `sendSol(connection, to, amount, credentials, options?)` - Send SOL to another address (requires SigningCredentials)
 - `sendToken(connection, tokenMint, to, amount, credentials, options?)` - Send SPL tokens to another address (requires SigningCredentials, amount is in human units; converted using decimals)
+- `estimateSendSolFee(connection, to, amount)` - Estimate transaction fee for sending SOL (returns fee in SOL)
+- `estimateSendTokenFee(connection, tokenMint, to, amount, options?)` - Estimate transaction fee for sending SPL tokens (returns fee in SOL)
 - `getTransactionActivity(connection, options?)` - Get transaction history
 - `signTransaction(transaction, credentials)` - Sign transaction (requires SigningCredentials)
 - `signMessage(message, credentials)` - Sign message (returns Uint8Array, requires SigningCredentials)
@@ -307,11 +334,10 @@ await wallet.sendSol(connection, recipient, 0.1, {
 - `stopTokenBalanceMonitoring(tokenMint)` - Stop monitoring specific token balance
 - `stopAllTokenBalanceMonitoring()` - Stop all token balance monitoring
 - `isBalanceMonitoringActive()` - Check if balance monitoring is active
-- `clear()` - Securely clear wallet from memory
-- `isCleared()` - Check if wallet is cleared
 
-### SigningCredentials Interface
+### Interfaces
 
+**SigningCredentials:**
 ```typescript
 interface SigningCredentials {
   seedPhrase?: string;        // 12 or 24 word mnemonic phrase
@@ -324,6 +350,24 @@ interface SigningCredentials {
 - Provide either `seedPhrase` OR `privateKey` (not both)
 - `derivationPath` is only used when `seedPhrase` is provided
 - Credentials are validated to match the wallet address before signing
+
+**WalletWithMnemonic:**
+```typescript
+interface WalletWithMnemonic {
+  wallet: SolanaWallet;
+  mnemonic: string;
+}
+```
+
+**WalletWithPrivateKey:**
+```typescript
+interface WalletWithPrivateKey {
+  wallet: SolanaWallet;
+  privateKey: string; // Base58 encoded private key
+}
+```
+
+**Note:** The wallet instance only stores the public key and derivation path (metadata). No sensitive data (mnemonic, private key, or keypair) is stored in memory.
 
 ### Security Utilities
 

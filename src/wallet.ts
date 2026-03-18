@@ -24,7 +24,7 @@ import * as bs58 from 'bs58';
 import {
   secureWipe,
 } from './security';
-import { base64ToUint8Array, uint8ArrayToBase64, hexToUint8Array, uint8ArrayToHex } from './utils';
+import { base64ToUint8Array, uint8ArrayToBase64, hexToUint8Array } from './utils';
 
 export interface WalletOptions {
   derivationPath?: string;
@@ -33,6 +33,11 @@ export interface WalletOptions {
 export interface WalletWithMnemonic {
   wallet: SolanaWallet;
   mnemonic: string;
+}
+
+export interface WalletWithPrivateKey {
+  wallet: SolanaWallet;
+  privateKey: string; // Base58 encoded private key
 }
 
 export interface SigningCredentials {
@@ -80,9 +85,8 @@ export type WalletEventListener<T = unknown> = (data: T) => void;
  * Self-custodial Solana wallet class
  */
 export class SolanaWallet {
-  private keypair: Keypair;
+  private publicKey: PublicKey;
   private derivationPath: string;
-  private _isCleared: boolean = false;
   private eventListeners: Map<
     WalletEventType,
     Set<(data: BalanceChangeEvent | TokenBalanceChangeEvent) => void>
@@ -98,8 +102,8 @@ export class SolanaWallet {
   private lastKnownBalance: number | null = null;
   private lastKnownTokenBalances: Map<string, TokenBalance | null> = new Map();
 
-  private constructor(keypair: Keypair, derivationPath: string = "m/44'/501'/0'/0'") {
-    this.keypair = keypair;
+  private constructor(publicKey: PublicKey, derivationPath: string = "m/44'/501'/0'/0'") {
+    this.publicKey = publicKey;
     this.derivationPath = derivationPath;
   }
 
@@ -116,7 +120,21 @@ export class SolanaWallet {
    */
   static create(options: WalletOptions = {}): SolanaWallet {
     const keypair = Keypair.generate();
-    return new SolanaWallet(keypair, options.derivationPath);
+    return new SolanaWallet(keypair.publicKey, options.derivationPath);
+  }
+
+  /**
+   * Create a new wallet with a random keypair and return the private key
+   * The private key is returned but NOT stored in the wallet
+   * @param options - Optional wallet options
+   * @returns Wallet and private key (base58 encoded)
+   */
+  static createWithPrivateKey(options: WalletOptions = {}): WalletWithPrivateKey {
+    const keypair = Keypair.generate();
+    const wallet = new SolanaWallet(keypair.publicKey, options.derivationPath);
+    const privateKey = bs58.encode(keypair.secretKey);
+    secureWipe(keypair.secretKey);
+    return { wallet, privateKey };
   }
 
   /**
@@ -243,7 +261,7 @@ export class SolanaWallet {
     secureWipe(seed);
     secureWipe(derivedSeed);
 
-    return new SolanaWallet(keypair, derivationPath);
+    return new SolanaWallet(keypair.publicKey, derivationPath);
   }
 
   /**
@@ -304,7 +322,7 @@ export class SolanaWallet {
       secureWipe(tempBuffer);
     }
 
-    return new SolanaWallet(keypair);
+    return new SolanaWallet(keypair.publicKey);
   }
 
 
@@ -312,49 +330,16 @@ export class SolanaWallet {
    * Get the public key (wallet address)
    */
   getPublicKey(): PublicKey {
-    this.ensureNotCleared();
-    return this.keypair.publicKey;
+    return this.publicKey;
   }
 
   /**
    * Get the public key as a string
    */
   getAddress(): string {
-    this.ensureNotCleared();
-    return this.keypair.publicKey.toBase58();
+    return this.publicKey.toBase58();
   }
 
-  /**
-   * Get the private key as Uint8Array
-   */
-  getPrivateKey(): Uint8Array {
-    this.ensureNotCleared();
-    return new Uint8Array(this.keypair.secretKey);
-  }
-
-  /**
-   * Get the private key as base64 string
-   */
-  getPrivateKeyBase64(): string {
-    this.ensureNotCleared();
-    return uint8ArrayToBase64(this.keypair.secretKey);
-  }
-
-  /**
-   * Get the private key as hex string
-   */
-  getPrivateKeyHex(): string {
-    this.ensureNotCleared();
-    return uint8ArrayToHex(this.keypair.secretKey);
-  }
-
-  /**
-   * Get the private key as base58 string (Solana's native format)
-   */
-  getPrivateKeyBase58(): string {
-    this.ensureNotCleared();
-    return bs58.encode(this.keypair.secretKey);
-  }
 
 
   /**
@@ -429,9 +414,8 @@ export class SolanaWallet {
     transaction: Transaction | VersionedTransaction,
     credentials: SigningCredentials
   ): Transaction | VersionedTransaction {
-    this.ensureNotCleared();
 
-    const walletAddress = this.keypair.publicKey.toBase58();
+    const walletAddress = this.publicKey.toBase58();
     const signingKeypair = SolanaWallet.getKeypairFromCredentials(credentials);
 
     if (signingKeypair.publicKey.toBase58() !== walletAddress) {
@@ -457,9 +441,8 @@ export class SolanaWallet {
     message: Uint8Array | string,
     credentials: SigningCredentials
   ): Uint8Array {
-    this.ensureNotCleared();
 
-    const walletAddress = this.keypair.publicKey.toBase58();
+    const walletAddress = this.publicKey.toBase58();
     const signingKeypair = SolanaWallet.getKeypairFromCredentials(credentials);
 
     if (signingKeypair.publicKey.toBase58() !== walletAddress) {
@@ -506,11 +489,10 @@ export class SolanaWallet {
    * @returns True if signature is valid
    */
   verifyMessage(message: Uint8Array | string, signature: Uint8Array): boolean {
-    this.ensureNotCleared();
 
     const messageBytes = typeof message === 'string' ? new TextEncoder().encode(message) : message;
 
-    return nacl.sign.detached.verify(messageBytes, signature, this.keypair.publicKey.toBytes());
+    return nacl.sign.detached.verify(messageBytes, signature, this.publicKey.toBytes());
   }
 
   /**
@@ -530,7 +512,6 @@ export class SolanaWallet {
     event: WalletEventType,
     listener: (data: BalanceChangeEvent | TokenBalanceChangeEvent) => void
   ): () => void {
-    this.ensureNotCleared();
     if (!this.eventListeners.has(event)) {
       this.eventListeners.set(event, new Set());
     }
@@ -589,7 +570,6 @@ export class SolanaWallet {
    * @param wsUrl - Optional WebSocket URL (if not provided, derived from connection endpoint)
    */
   async startBalanceMonitoring(connection: Connection, wsUrl?: string): Promise<void> {
-    this.ensureNotCleared();
     this.stopBalanceMonitoring();
 
     this.balanceMonitorConnection = connection;
@@ -603,7 +583,7 @@ export class SolanaWallet {
 
     // Create Solana Kit RPC subscriptions client
     const rpcSubscriptions = createSolanaRpcSubscriptions(websocketUrl);
-    const accountAddress = address(this.keypair.publicKey.toString());
+    const accountAddress = address(this.publicKey.toString());
 
     // Create abort controller for cleanup
     const abortController = new AbortController();
@@ -619,7 +599,7 @@ export class SolanaWallet {
     (async () => {
       try {
         for await (const notification of accountNotifications) {
-          if (this._isCleared || abortController.signal.aborted) {
+          if (abortController.signal.aborted) {
             break;
           }
 
@@ -634,7 +614,7 @@ export class SolanaWallet {
           this.lastKnownBalance = newBalance;
         }
       } catch (error) {
-        if (!abortController.signal.aborted && !this._isCleared) {
+        if (!abortController.signal.aborted) {
           console.error('Error in balance monitoring:', error);
         }
       }
@@ -669,7 +649,6 @@ export class SolanaWallet {
     connection: Connection,
     tokenMint: PublicKey | string
   ): Promise<void> {
-    this.ensureNotCleared();
 
     const mintPublicKey = typeof tokenMint === 'string' ? new PublicKey(tokenMint) : tokenMint;
     const mintString = mintPublicKey.toString();
@@ -678,7 +657,7 @@ export class SolanaWallet {
 
     const associatedTokenAddress = await getAssociatedTokenAddress(
       mintPublicKey,
-      this.keypair.publicKey
+      this.publicKey
     );
 
     const initialBalance = await this.getTokenBalance(connection, mintPublicKey);
@@ -722,7 +701,7 @@ export class SolanaWallet {
     decimals: number
   ): void {
     const handleAccountChange = (accountInfo: AccountInfo<Buffer> | null) => {
-      if (this._isCleared || abortController.signal.aborted) {
+      if (abortController.signal.aborted) {
         return;
       }
 
@@ -875,8 +854,7 @@ export class SolanaWallet {
    * @returns Balance in SOL (not lamports)
    */
   async getBalance(connection: Connection): Promise<number> {
-    this.ensureNotCleared();
-    const lamports = await connection.getBalance(this.keypair.publicKey);
+    const lamports = await connection.getBalance(this.publicKey);
     return lamports / LAMPORTS_PER_SOL;
   }
 
@@ -890,12 +868,11 @@ export class SolanaWallet {
     connection: Connection,
     tokenMint: PublicKey | string
   ): Promise<TokenBalance | null> {
-    this.ensureNotCleared();
 
     const mintPublicKey = typeof tokenMint === 'string' ? new PublicKey(tokenMint) : tokenMint;
     const associatedTokenAddress = await getAssociatedTokenAddress(
       mintPublicKey,
-      this.keypair.publicKey
+      this.publicKey
     );
 
     try {
@@ -927,9 +904,8 @@ export class SolanaWallet {
    * @returns Array of token balances
    */
   async getAllTokenBalances(connection: Connection): Promise<TokenBalance[]> {
-    this.ensureNotCleared();
 
-    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(this.keypair.publicKey, {
+    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(this.publicKey, {
       programId: TOKEN_PROGRAM_ID,
     });
 
@@ -963,9 +939,8 @@ export class SolanaWallet {
       maxRetries?: number;
     }
   ): Promise<string> {
-    this.ensureNotCleared();
 
-    const walletAddress = this.keypair.publicKey.toBase58();
+    const walletAddress = this.publicKey.toBase58();
     const signingKeypair = SolanaWallet.getKeypairFromCredentials(credentials);
 
     if (signingKeypair.publicKey.toBase58() !== walletAddress) {
@@ -977,7 +952,7 @@ export class SolanaWallet {
 
     const transaction = new Transaction().add(
       SystemProgram.transfer({
-        fromPubkey: this.keypair.publicKey,
+        fromPubkey: this.publicKey,
         toPubkey: toPublicKey,
         lamports,
       })
@@ -1012,6 +987,43 @@ export class SolanaWallet {
   }
 
   /**
+   * Estimate transaction fee for sending SOL
+   * @param connection - Solana RPC connection
+   * @param to - Recipient address (PublicKey or string)
+   * @param amount - Amount in SOL (not lamports)
+   * @returns Estimated fee in SOL
+   */
+  async estimateSendSolFee(
+    connection: Connection,
+    to: PublicKey | string,
+    amount: number
+  ): Promise<number> {
+
+    const toPublicKey = typeof to === 'string' ? new PublicKey(to) : to;
+    const lamports = amount * LAMPORTS_PER_SOL;
+
+    const transaction = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: this.publicKey,
+        toPubkey: toPublicKey,
+        lamports,
+      })
+    );
+
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = this.publicKey;
+
+    const feeResponse = await connection.getFeeForMessage(transaction.compileMessage());
+
+    if (!feeResponse || feeResponse.value === null || feeResponse.value === undefined) {
+      return 0.000005;
+    }
+
+    return Number(feeResponse.value) / LAMPORTS_PER_SOL;
+  }
+
+  /**
    * Send SPL tokens to another address
    * @param connection - Solana RPC connection
    * @param tokenMint - Token mint address (PublicKey or string)
@@ -1033,9 +1045,8 @@ export class SolanaWallet {
       decimals?: number;
     }
   ): Promise<string> {
-    this.ensureNotCleared();
 
-    const walletAddress = this.keypair.publicKey.toBase58();
+    const walletAddress = this.publicKey.toBase58();
     const signingKeypair = SolanaWallet.getKeypairFromCredentials(credentials);
 
     if (signingKeypair.publicKey.toBase58() !== walletAddress) {
@@ -1045,7 +1056,7 @@ export class SolanaWallet {
     const mintPublicKey = typeof tokenMint === 'string' ? new PublicKey(tokenMint) : tokenMint;
     const toPublicKey = typeof to === 'string' ? new PublicKey(to) : to;
 
-    const fromTokenAddress = await getAssociatedTokenAddress(mintPublicKey, this.keypair.publicKey);
+    const fromTokenAddress = await getAssociatedTokenAddress(mintPublicKey, this.publicKey);
     const toTokenAddress = await getAssociatedTokenAddress(mintPublicKey, toPublicKey);
     let decimals = options?.decimals;
     if (!decimals) {
@@ -1068,7 +1079,7 @@ export class SolanaWallet {
       createTransferInstruction(
         fromTokenAddress,
         toTokenAddress,
-        this.keypair.publicKey,
+        this.publicKey,
         amountInSmallestUnit,
         [],
         TOKEN_PROGRAM_ID
@@ -1109,6 +1120,72 @@ export class SolanaWallet {
   }
 
   /**
+   * Estimate transaction fee for sending SPL tokens
+   * @param connection - Solana RPC connection
+   * @param tokenMint - Token mint address (PublicKey or string)
+   * @param to - Recipient address (PublicKey or string)
+   * @param amount - Amount in token's smallest unit (considering decimals)
+   * @param options - Optional options including decimals
+   * @returns Estimated fee in SOL
+   */
+  async estimateSendTokenFee(
+    connection: Connection,
+    tokenMint: PublicKey | string,
+    to: PublicKey | string,
+    amount: number,
+    options?: {
+      decimals?: number;
+    }
+  ): Promise<number> {
+
+    const mintPublicKey = typeof tokenMint === 'string' ? new PublicKey(tokenMint) : tokenMint;
+    const toPublicKey = typeof to === 'string' ? new PublicKey(to) : to;
+
+    const fromTokenAddress = await getAssociatedTokenAddress(mintPublicKey, this.publicKey);
+    const toTokenAddress = await getAssociatedTokenAddress(mintPublicKey, toPublicKey);
+
+    let decimals = options?.decimals;
+    if (!decimals) {
+      try {
+        const mintInfo = await connection.getParsedAccountInfo(mintPublicKey);
+        if (mintInfo.value && 'parsed' in mintInfo.value.data) {
+          decimals = mintInfo.value.data.parsed.info.decimals;
+        } else {
+          decimals = 9;
+        }
+      } catch {
+        decimals = 9;
+      }
+    }
+
+    const finalDecimals = decimals || 9;
+    const amountInSmallestUnit = BigInt(Math.floor(amount * Math.pow(10, finalDecimals)));
+
+    const transaction = new Transaction().add(
+      createTransferInstruction(
+        fromTokenAddress,
+        toTokenAddress,
+        this.publicKey,
+        amountInSmallestUnit,
+        [],
+        TOKEN_PROGRAM_ID
+      )
+    );
+
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = this.publicKey;
+
+    const feeResponse = await connection.getFeeForMessage(transaction.compileMessage());
+
+    if (!feeResponse || feeResponse.value === null || feeResponse.value === undefined) {
+      return 0.000005;
+    }
+
+    return Number(feeResponse.value) / LAMPORTS_PER_SOL;
+  }
+
+  /**
    * Get transaction activity for this wallet
    * @param connection - Solana RPC connection
    * @param options - Options for fetching transactions
@@ -1122,7 +1199,6 @@ export class SolanaWallet {
       until?: string;
     }
   ): Promise<TransactionActivity[]> {
-    this.ensureNotCleared();
 
     const limit = options?.limit || 20;
 
@@ -1132,7 +1208,7 @@ export class SolanaWallet {
       : Math.min(Math.max(limit * 2, 20), 100);
 
     const walletSignatures = await connection.getSignaturesForAddress(
-      this.keypair.publicKey,
+      this.publicKey,
       {
         limit: fetchLimit,
         before: options?.before,
@@ -1144,7 +1220,7 @@ export class SolanaWallet {
 
     try {
       const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
-        this.keypair.publicKey,
+        this.publicKey,
         {
           programId: TOKEN_PROGRAM_ID,
         }
@@ -1202,7 +1278,7 @@ export class SolanaWallet {
           maxSupportedTransactionVersion: 0,
         });
 
-        return this.parseTransactionActivity(sigInfo, tx, this.keypair.publicKey);
+        return this.parseTransactionActivity(sigInfo, tx, this.publicKey);
       } catch {
         return {
           signature: sigInfo.signature,
@@ -1339,38 +1415,4 @@ export class SolanaWallet {
     };
   }
 
-  /**
-   * Securely clear the wallet from memory
-   * After calling this, the wallet cannot be used for signing
-   */
-  clear(): void {
-    if (this._isCleared) {
-      return;
-    }
-
-    this.stopBalanceMonitoring();
-    this.stopAllTokenBalanceMonitoring();
-    this.removeAllListeners();
-
-    secureWipe(this.keypair.secretKey);
-
-    this._isCleared = true;
-  }
-
-  /**
-   * Check if the wallet has been cleared
-   */
-  isCleared(): boolean {
-    return this._isCleared;
-  }
-
-  /**
-   * Ensure the wallet has not been cleared
-   * @private
-   */
-  private ensureNotCleared(): void {
-    if (this._isCleared) {
-      throw new Error('Wallet has been cleared and can no longer be used');
-    }
-  }
 }

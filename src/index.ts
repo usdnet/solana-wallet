@@ -6,6 +6,7 @@ export {
   SolanaWallet,
   WalletOptions,
   WalletWithMnemonic,
+  WalletWithPrivateKey,
   SigningCredentials,
   TokenBalance,
   TransactionActivity,
