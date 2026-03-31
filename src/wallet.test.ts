@@ -7,9 +7,7 @@ import { SolanaWallet } from './wallet';
 import { Keypair, Transaction, SystemProgram, PublicKey, Connection, AccountInfo } from '@solana/web3.js';
 import * as web3 from '@solana/web3.js';
 import * as bip39 from 'bip39';
-import * as bs58 from 'bs58';
 import * as splToken from '@solana/spl-token';
-import { uint8ArrayToBase64 } from './utils';
 
 // Mock @solana/web3.js
 vi.mock('@solana/web3.js', async () => {
@@ -64,30 +62,6 @@ describe('SolanaWallet', () => {
       const mnemonic1 = SolanaWallet.generateMnemonic();
       const mnemonic2 = SolanaWallet.generateMnemonic();
       expect(mnemonic1).not.toBe(mnemonic2);
-    });
-  });
-
-  describe('createWithPrivateKey', () => {
-    it('should create wallet and return private key', () => {
-      const { wallet, privateKey } = SolanaWallet.createWithPrivateKey();
-      expect(wallet).toBeInstanceOf(SolanaWallet);
-      expect(typeof privateKey).toBe('string');
-      expect(privateKey.length).toBeGreaterThan(0);
-    });
-
-    it('should return private key that can be used to recreate wallet', () => {
-      const { wallet, privateKey } = SolanaWallet.createWithPrivateKey();
-      const address = wallet.getAddress();
-
-      const recreatedWallet = SolanaWallet.fromPrivateKey(privateKey);
-      expect(recreatedWallet.getAddress()).toBe(address);
-    });
-
-    it('should not store private key in wallet', () => {
-      const { wallet } = SolanaWallet.createWithPrivateKey();
-      // Wallet should not have any method to retrieve private key
-      expect(wallet.getAddress()).toBeDefined();
-      expect(wallet.getPublicKey()).toBeDefined();
     });
   });
 
@@ -188,48 +162,6 @@ describe('SolanaWallet', () => {
     });
   });
 
-  describe('fromPrivateKey', () => {
-    it('should import from Uint8Array (32 bytes)', () => {
-      const keypair = Keypair.generate();
-      const seed = keypair.secretKey.slice(0, 32);
-      const wallet = SolanaWallet.fromPrivateKey(seed);
-      expect(wallet.getAddress()).toBe(keypair.publicKey.toBase58());
-    });
-
-    it('should import from Uint8Array (64 bytes)', () => {
-      const keypair = Keypair.generate();
-      const wallet = SolanaWallet.fromPrivateKey(keypair.secretKey);
-      expect(wallet.getAddress()).toBe(keypair.publicKey.toBase58());
-    });
-
-    it('should import from base58 string', () => {
-      const keypair = Keypair.generate();
-      const base58 = bs58.encode(keypair.secretKey);
-      const wallet = SolanaWallet.fromPrivateKey(base58);
-      expect(wallet.getAddress()).toBe(keypair.publicKey.toBase58());
-    });
-
-    it('should import from base64 string', () => {
-      const keypair = Keypair.generate();
-      const base64 = Buffer.from(keypair.secretKey).toString('base64');
-      const wallet = SolanaWallet.fromPrivateKey(base64);
-      expect(wallet.getAddress()).toBe(keypair.publicKey.toBase58());
-    });
-
-    it('should import from hex string', () => {
-      const keypair = Keypair.generate();
-      const hex = Buffer.from(keypair.secretKey).toString('hex');
-      const wallet = SolanaWallet.fromPrivateKey(hex);
-      expect(wallet.getAddress()).toBe(keypair.publicKey.toBase58());
-    });
-
-    it('should reject invalid private key format', () => {
-      expect(() => {
-        SolanaWallet.fromPrivateKey('invalid-key');
-      }).toThrow();
-    });
-  });
-
   describe('validateSeedPhrase', () => {
     it('should validate correct seed phrase', () => {
       const { wallet, mnemonic } = SolanaWallet.createWithMnemonic();
@@ -257,48 +189,6 @@ describe('SolanaWallet', () => {
 
       const isValid = SolanaWallet.validateSeedPhrase(address, mnemonic, "m/44'/501'/0'/0'");
       expect(isValid).toBe(true);
-    });
-  });
-
-  describe('validatePrivateKey', () => {
-    it('should validate correct private key', () => {
-      const testKeypair = Keypair.generate();
-      const wallet = SolanaWallet.fromPrivateKey(bs58.encode(testKeypair.secretKey));
-      const address = wallet.getAddress();
-      const privateKey = bs58.encode(testKeypair.secretKey);
-
-      const isValid = SolanaWallet.validatePrivateKey(address, privateKey);
-      expect(isValid).toBe(true);
-    });
-
-    it('should validate private key in base64 format', () => {
-      const testKeypair = Keypair.generate();
-      const wallet = SolanaWallet.fromPrivateKey(bs58.encode(testKeypair.secretKey));
-      const address = wallet.getAddress();
-      const privateKey = uint8ArrayToBase64(testKeypair.secretKey);
-
-      const isValid = SolanaWallet.validatePrivateKey(address, privateKey);
-      expect(isValid).toBe(true);
-    });
-
-    it('should validate private key as Uint8Array', () => {
-      const testKeypair = Keypair.generate();
-      const wallet = SolanaWallet.fromPrivateKey(testKeypair.secretKey);
-      const address = wallet.getAddress();
-
-      const isValid = SolanaWallet.validatePrivateKey(address, testKeypair.secretKey);
-      expect(isValid).toBe(true);
-    });
-
-    it('should reject incorrect private key', () => {
-      const testKeypair1 = Keypair.generate();
-      const testKeypair2 = Keypair.generate();
-      const wallet = SolanaWallet.fromPrivateKey(bs58.encode(testKeypair1.secretKey));
-      const address = wallet.getAddress();
-      const wrongPrivateKey = bs58.encode(testKeypair2.secretKey);
-
-      const isValid = SolanaWallet.validatePrivateKey(address, wrongPrivateKey);
-      expect(isValid).toBe(false);
     });
   });
 

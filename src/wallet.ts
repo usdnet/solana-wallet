@@ -24,7 +24,7 @@ import * as bs58 from 'bs58';
 import {
   secureWipe,
 } from './security';
-import { base64ToUint8Array, uint8ArrayToBase64, hexToUint8Array } from './utils';
+import { uint8ArrayToBase64 } from './utils';
 
 export interface WalletOptions {
   derivationPath?: string;
@@ -35,14 +35,8 @@ export interface WalletWithMnemonic {
   mnemonic: string;
 }
 
-export interface WalletWithPrivateKey {
-  wallet: SolanaWallet;
-  privateKey: string; // Base58 encoded private key
-}
-
 export interface SigningCredentials {
-  seedPhrase?: string;
-  privateKey?: string | Uint8Array;
+  seedPhrase: string;
   derivationPath?: string;
 }
 
@@ -124,20 +118,6 @@ export class SolanaWallet {
   }
 
   /**
-   * Create a new wallet with a random keypair and return the private key
-   * The private key is returned but NOT stored in the wallet
-   * @param options - Optional wallet options
-   * @returns Wallet and private key (base58 encoded)
-   */
-  static createWithPrivateKey(options: WalletOptions = {}): WalletWithPrivateKey {
-    const keypair = Keypair.generate();
-    const wallet = new SolanaWallet(keypair.publicKey, options.derivationPath);
-    const privateKey = bs58.encode(keypair.secretKey);
-    secureWipe(keypair.secretKey);
-    return { wallet, privateKey };
-  }
-
-  /**
    * Generate a mnemonic and create a wallet from it
    * @param options - Wallet options including derivation path and mnemonic strength
    * @returns Object containing both the wallet and the mnemonic phrase
@@ -184,66 +164,6 @@ export class SolanaWallet {
   }
 
   /**
-   * Validate if a private key matches a given wallet address
-   * @param address - Wallet address to check against
-   * @param privateKey - Private key to validate (Uint8Array or string)
-   * @returns True if the private key generates the given address
-   */
-  static validatePrivateKey(address: string, privateKey: Uint8Array | string): boolean {
-    try {
-      let secretKey: Uint8Array;
-
-      if (typeof privateKey === 'string') {
-        try {
-          const decoded = bs58.decode(privateKey);
-          if (decoded.length === 64 || decoded.length === 32) {
-            secretKey = decoded;
-          } else {
-            return false;
-          }
-        } catch {
-          try {
-            const decoded = base64ToUint8Array(privateKey);
-            if (decoded.length === 64 || decoded.length === 32) {
-              secretKey = decoded;
-            } else {
-              return false;
-            }
-          } catch {
-            try {
-              const hexString = privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey;
-              const decoded = hexToUint8Array(hexString);
-              if (decoded.length === 64 || decoded.length === 32) {
-                secretKey = decoded;
-              } else {
-                return false;
-              }
-            } catch {
-              return false;
-            }
-          }
-        }
-      } else {
-        secretKey = privateKey;
-      }
-
-      let keypair: Keypair;
-      if (secretKey.length === 32) {
-        keypair = Keypair.fromSeed(secretKey);
-      } else if (secretKey.length === 64) {
-        keypair = Keypair.fromSecretKey(secretKey);
-      } else {
-        return false;
-      }
-
-      const generatedAddress = keypair.publicKey.toBase58();
-      return generatedAddress === address;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
    * Import wallet from a seed phrase (mnemonic)
    * @param mnemonic - 12 or 24 word seed phrase
    * @param options - Wallet options including derivation path
@@ -263,68 +183,6 @@ export class SolanaWallet {
 
     return new SolanaWallet(keypair.publicKey, derivationPath);
   }
-
-  /**
-   * Import wallet from a private key
-   * @param privateKey - Private key as Uint8Array (32 or 64 bytes) or string (base64/hex/base58)
-   */
-  static fromPrivateKey(privateKey: Uint8Array | string): SolanaWallet {
-    let secretKey: Uint8Array;
-    let tempBuffer: Uint8Array | null = null;
-
-    if (typeof privateKey === 'string') {
-      try {
-        const decoded = bs58.decode(privateKey);
-        if (decoded.length === 64 || decoded.length === 32) {
-          secretKey = decoded;
-          tempBuffer = decoded;
-        } else {
-          throw new Error('Invalid base58 key length');
-        }
-      } catch {
-        try {
-          const decoded = base64ToUint8Array(privateKey);
-          if (decoded.length === 64 || decoded.length === 32) {
-            secretKey = decoded;
-            tempBuffer = secretKey;
-          } else {
-            throw new Error('Invalid base64 key length');
-          }
-        } catch {
-          try {
-            const hexString = privateKey.startsWith('0x') ? privateKey.slice(2) : privateKey;
-            const decoded = hexToUint8Array(hexString);
-            if (decoded.length === 64 || decoded.length === 32) {
-              secretKey = decoded;
-              tempBuffer = secretKey;
-            } else {
-              throw new Error('Invalid hex key length');
-            }
-          } catch {
-            throw new Error('Invalid private key format. Expected base58, base64, or hex string.');
-          }
-        }
-      }
-    } else {
-      secretKey = privateKey;
-    }
-
-    let keypair: Keypair;
-    if (secretKey.length === 32) {
-      keypair = Keypair.fromSeed(secretKey);
-    } else if (secretKey.length === 64) {
-      keypair = Keypair.fromSecretKey(secretKey);
-    } else {
-      throw new Error('Invalid private key length. Expected 32 or 64 bytes.');
-    }
-
-    if (tempBuffer && tempBuffer !== secretKey) {
-      secureWipe(tempBuffer);
-    }
-
-    return new SolanaWallet(keypair.publicKey);
-  }
-
 
   /**
    * Get the public key (wallet address)
@@ -347,68 +205,22 @@ export class SolanaWallet {
    * @private
    */
   private static getKeypairFromCredentials(credentials: SigningCredentials): Keypair {
-    if (credentials.seedPhrase) {
-      if (!bip39.validateMnemonic(credentials.seedPhrase)) {
-        throw new Error('Invalid mnemonic phrase');
-      }
-      const seed = bip39.mnemonicToSeedSync(credentials.seedPhrase);
-      const path = credentials.derivationPath || "m/44'/501'/0'/0'";
-      const derivedSeed = derivePath(path, seed.toString('hex')).key;
-      const keypair = Keypair.fromSeed(derivedSeed);
-      secureWipe(seed);
-      secureWipe(derivedSeed);
-      return keypair;
-    } else if (credentials.privateKey) {
-      let secretKey: Uint8Array;
-      if (typeof credentials.privateKey === 'string') {
-        try {
-          const decoded = bs58.decode(credentials.privateKey);
-          if (decoded.length === 64 || decoded.length === 32) {
-            secretKey = decoded;
-          } else {
-            throw new Error('Invalid base58 key length');
-          }
-        } catch {
-          try {
-            const decoded = base64ToUint8Array(credentials.privateKey);
-            if (decoded.length === 64 || decoded.length === 32) {
-              secretKey = decoded;
-            } else {
-              throw new Error('Invalid base64 key length');
-            }
-          } catch {
-            try {
-              const hexString = credentials.privateKey.startsWith('0x') ? credentials.privateKey.slice(2) : credentials.privateKey;
-              const decoded = hexToUint8Array(hexString);
-              if (decoded.length === 64 || decoded.length === 32) {
-                secretKey = decoded;
-              } else {
-                throw new Error('Invalid hex key length');
-              }
-            } catch {
-              throw new Error('Invalid private key format. Expected base58, base64, or hex string.');
-            }
-          }
-        }
-      } else {
-        secretKey = credentials.privateKey;
-      }
-      if (secretKey.length === 32) {
-        return Keypair.fromSeed(secretKey);
-      } else if (secretKey.length === 64) {
-        return Keypair.fromSecretKey(secretKey);
-      } else {
-        throw new Error('Invalid private key length. Expected 32 or 64 bytes.');
-      }
-    } else {
-      throw new Error('Either seedPhrase or privateKey must be provided in credentials');
+    if (!bip39.validateMnemonic(credentials.seedPhrase)) {
+      throw new Error('Invalid mnemonic phrase');
     }
+    const seed = bip39.mnemonicToSeedSync(credentials.seedPhrase);
+    const path = credentials.derivationPath || "m/44'/501'/0'/0'";
+    const derivedSeed = derivePath(path, seed.toString('hex')).key;
+    const keypair = Keypair.fromSeed(derivedSeed);
+    secureWipe(seed);
+    secureWipe(derivedSeed);
+    return keypair;
   }
 
   /**
    * Sign a transaction
    * @param transaction - Solana transaction to sign
-   * @param credentials - Signing credentials object with either seedPhrase or privateKey
+   * @param credentials - Signing credentials with seed phrase (and optional derivation path)
    */
   signTransaction(
     transaction: Transaction | VersionedTransaction,
@@ -434,7 +246,7 @@ export class SolanaWallet {
   /**
    * Sign a message
    * @param message - Message to sign (as Uint8Array or string)
-   * @param credentials - Signing credentials object with either seedPhrase or privateKey
+   * @param credentials - Signing credentials with seed phrase (and optional derivation path)
    * @returns Signature as Uint8Array
    */
   signMessage(
@@ -457,7 +269,7 @@ export class SolanaWallet {
   /**
    * Sign a message and return as base64 string
    * @param message - Message to sign (as Uint8Array or string)
-   * @param credentials - Signing credentials object with either seedPhrase or privateKey
+   * @param credentials - Signing credentials with seed phrase (and optional derivation path)
    * @returns Signature as base64 string
    */
   signMessageBase64(
@@ -471,7 +283,7 @@ export class SolanaWallet {
   /**
    * Sign a message and return as base58 string
    * @param message - Message to sign (as Uint8Array or string)
-   * @param credentials - Signing credentials object with either seedPhrase or privateKey
+   * @param credentials - Signing credentials with seed phrase (and optional derivation path)
    * @returns Signature as base58 string
    */
   signMessageBase58(
@@ -925,7 +737,7 @@ export class SolanaWallet {
    * @param connection - Solana RPC connection
    * @param to - Recipient address (PublicKey or string)
    * @param amount - Amount in SOL (not lamports)
-   * @param credentials - Signing credentials object with either seedPhrase or privateKey
+   * @param credentials - Signing credentials with seed phrase (and optional derivation path)
    * @param options - Optional transaction options
    * @returns Transaction signature
    */
@@ -1029,7 +841,7 @@ export class SolanaWallet {
    * @param tokenMint - Token mint address (PublicKey or string)
    * @param to - Recipient address (PublicKey or string)
    * @param amount - Amount in token's smallest unit (considering decimals)
-   * @param credentials - Signing credentials object with either seedPhrase or privateKey
+   * @param credentials - Signing credentials with seed phrase (and optional derivation path)
    * @param options - Optional transaction options
    * @returns Transaction signature
    */

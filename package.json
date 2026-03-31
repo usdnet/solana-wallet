@@ -1,7 +1,7 @@
 {
   "name": "@usdnet/solana-wallet",
-  "version": "1.2.2",
-  "description": "A self-custodial Solana wallet package with support for creating wallets, importing from seed phrases or private keys, and signing transactions and messages",
+  "version": "1.3.1",
+  "description": "Self-custodial Solana wallet library: create or import wallets from BIP39 seed phrases, sign transactions and messages, send SOL and SPL tokens, estimate fees, activity, balance monitoring, and encrypted storage helpers",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

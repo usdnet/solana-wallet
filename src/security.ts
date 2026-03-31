@@ -135,7 +135,7 @@ export async function decryptData(
 
 /**
  * Create a secure storage key for encrypting wallet data
- * This generates a key that can be used to encrypt/decrypt private keys
+ * This generates a key that can be used to encrypt/decrypt sensitive wallet data
  */
 export async function createSecureStorageKey(
   password: string,

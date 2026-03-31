@@ -1,6 +1,6 @@
 # solana-wallet
 
-A secure, self-custodial Solana wallet package for web applications. Create wallets, import from seed phrases or private keys, and sign transactions. The wallet only stores the public key and derivation path (metadata) - no sensitive data is stored in memory. Seed phrases and private keys must be provided for each signing operation.
+A secure, self-custodial Solana wallet package for web applications. Create wallets, import from BIP39 seed phrases, and sign transactions. The wallet only stores the public key and derivation path (metadata)—no sensitive data is stored in memory. The seed phrase must be supplied when signing or sending; raw private keys are not supported.
 
 ## Installation
 
@@ -28,19 +28,6 @@ console.log('Mnemonic:', mnemonic); // Save this securely!
 const { wallet: wallet24, mnemonic: mnemonic24 } = SolanaWallet.createWithMnemonic({ strength: 256 });
 ```
 
-### Create Wallet with Private Key
-
-```typescript
-// Generate keypair and create wallet together
-const { wallet, privateKey } = SolanaWallet.createWithPrivateKey();
-console.log('Address:', wallet.getAddress());
-console.log('Private Key:', privateKey); // Save this securely! (base58 encoded)
-
-// The private key is returned but NOT stored in the wallet
-// You can later recreate the wallet using:
-const recreatedWallet = SolanaWallet.fromPrivateKey(privateKey);
-```
-
 ### Generate Mnemonic Only
 
 ```typescript
@@ -64,13 +51,7 @@ console.log('Address:', wallet.getAddress());
 const wallet = SolanaWallet.fromSeedPhrase('word1 word2 ... word12');
 ```
 
-### Import from Private Key
-
-```typescript
-const wallet = SolanaWallet.fromPrivateKey('base58-or-base64-or-hex-string');
-```
-
-### Validate Credentials
+### Validate Seed Phrase
 
 ```typescript
 // Validate if a seed phrase matches a wallet address
@@ -78,12 +59,6 @@ const isValid = SolanaWallet.validateSeedPhrase(
   walletAddress,
   'word1 word2 ... word12',
   "m/44'/501'/0'/0'" // Optional derivation path
-);
-
-// Validate if a private key matches a wallet address
-const isValidKey = SolanaWallet.validatePrivateKey(
-  walletAddress,
-  'base58-or-base64-or-hex-string'
 );
 ```
 
@@ -96,29 +71,17 @@ const transaction = new Transaction();
 transaction.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
 transaction.feePayer = wallet.getPublicKey();
 
-// Sign with seed phrase
 const signed = wallet.signTransaction(transaction, {
   seedPhrase: 'word1 word2 ... word12',
   derivationPath: "m/44'/501'/0'/0'" // Optional
-});
-
-// Or sign with private key
-const signed2 = wallet.signTransaction(transaction, {
-  privateKey: 'base58-or-base64-or-hex-string'
 });
 ```
 
 ### Sign Message
 
 ```typescript
-// Sign with seed phrase
 const signature = wallet.signMessage('Hello, Solana!', {
   seedPhrase: 'word1 word2 ... word12'
-});
-
-// Or sign with private key
-const signature2 = wallet.signMessage('Hello, Solana!', {
-  privateKey: 'base58-or-base64-or-hex-string'
 });
 
 const isValid = wallet.verifyMessage('Hello, Solana!', signature);
@@ -155,14 +118,8 @@ import { Connection, PublicKey } from '@solana/web3.js';
 const connection = new Connection('https://api.mainnet-beta.solana.com');
 const recipient = new PublicKey('RecipientAddressHere');
 
-// Send 0.1 SOL with seed phrase
 const signature = await wallet.sendSol(connection, recipient, 0.1, {
   seedPhrase: 'word1 word2 ... word12'
-});
-
-// Or send with private key
-const signature2 = await wallet.sendSol(connection, recipient, 0.1, {
-  privateKey: 'base58-or-base64-or-hex-string'
 }, {
   skipPreflight: false, // Optional transaction options
   maxRetries: 3
@@ -180,20 +137,12 @@ const connection = new Connection('https://api.mainnet-beta.solana.com');
 const tokenMint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'); // USDC
 const recipient = new PublicKey('RecipientAddressHere');
 
-// Send 100 tokens with seed phrase (amount is in human units; converted using decimals)
 const signature = await wallet.sendToken(connection, tokenMint, recipient, 100, {
   seedPhrase: 'word1 word2 ... word12'
 }, {
   decimals: 6, // Optional: auto-detected if not provided
   skipPreflight: false,
   maxRetries: 3
-});
-
-// Or send with private key
-const signature2 = await wallet.sendToken(connection, tokenMint, recipient, 100, {
-  privateKey: 'base58-or-base64-or-hex-string'
-}, {
-  decimals: 6
 });
 
 console.log(`Transaction: ${signature}`);
@@ -293,7 +242,7 @@ await wallet.sendSol(connection, recipient, 0.1, {
 - Provide credentials only when needed for signing/sending
 - Use HTTPS in production
 - Validate credentials match wallet address before signing
-- Never log or expose seed phrases or private keys
+- Never log or expose seed phrases
 
 ## API Reference
 
@@ -302,12 +251,9 @@ await wallet.sendSol(connection, recipient, 0.1, {
 **Static Methods:**
 - `generateMnemonic(strength?)` - Generate mnemonic seed phrase (128 bits = 12 words, 256 bits = 24 words)
 - `createWithMnemonic(options?)` - Generate mnemonic and create wallet together
-- `createWithPrivateKey(options?)` - Generate keypair and create wallet together, returns private key (base58 encoded) but does NOT store it
 - `create(options?)` - Create new wallet with random keypair
 - `fromSeedPhrase(mnemonic, options?)` - Import from seed phrase
-- `fromPrivateKey(privateKey)` - Import from private key (base58/base64/hex/Uint8Array)
 - `validateSeedPhrase(address, mnemonic, derivationPath?)` - Validate if seed phrase matches wallet address
-- `validatePrivateKey(address, privateKey)` - Validate if private key matches wallet address
 
 **Instance Methods:**
 - `getAddress()` - Get wallet address (string)
@@ -340,15 +286,14 @@ await wallet.sendSol(connection, recipient, 0.1, {
 **SigningCredentials:**
 ```typescript
 interface SigningCredentials {
-  seedPhrase?: string;        // 12 or 24 word mnemonic phrase
-  privateKey?: string | Uint8Array;  // Private key in base58/base64/hex or Uint8Array
-  derivationPath?: string;    // Optional derivation path (only used with seedPhrase, default: "m/44'/501'/0'/0'")
+  seedPhrase: string;         // 12 or 24 word BIP39 mnemonic phrase
+  derivationPath?: string;    // Optional derivation path (default: "m/44'/501'/0'/0'")
 }
 ```
 
 **Usage:**
-- Provide either `seedPhrase` OR `privateKey` (not both)
-- `derivationPath` is only used when `seedPhrase` is provided
+- Always provide `seedPhrase` for signing and sending
+- `derivationPath` must match the path used when the wallet was created or imported
 - Credentials are validated to match the wallet address before signing
 
 **WalletWithMnemonic:**
@@ -359,15 +304,7 @@ interface WalletWithMnemonic {
 }
 ```
 
-**WalletWithPrivateKey:**
-```typescript
-interface WalletWithPrivateKey {
-  wallet: SolanaWallet;
-  privateKey: string; // Base58 encoded private key
-}
-```
-
-**Note:** The wallet instance only stores the public key and derivation path (metadata). No sensitive data (mnemonic, private key, or keypair) is stored in memory.
+**Note:** The wallet instance only stores the public key and derivation path (metadata). No sensitive data (mnemonic or keypair) is stored in memory.
 
 ### Security Utilities
 
